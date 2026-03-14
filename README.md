@@ -6,7 +6,7 @@ A starter Python workspace for:
 - Building simple dashboards (Streamlit)
 - Running ML experiments and exporting CSV output for other AI tools
 
-## Getting Started
+## Getting Started Testing
 
 1. Create a Python environment (recommended):
    ```bash
