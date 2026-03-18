@@ -29,7 +29,7 @@ from src.order_analysis import average_order_value_by_type_period
 DEFAULT_BASE_URL = "https://data-dev.localfoodmarketplace.com"
 DEFAULT_ENDPOINT = "/api/Orders"
 DEFAULT_API_KEY = "158d2724-fa51-4f7d-be0e-682e4e2860dc"
-DEFAULT_LAST_DAYS = 90
+DEFAULT_LAST_DAYS = 730
 
 
 def _compute_date_range(
@@ -148,7 +148,7 @@ def main() -> None:
         st.sidebar.markdown("---")
         st.sidebar.header("Date filter")
         last_days = st.sidebar.number_input(
-            "Last N days", min_value=1, max_value=365, value=DEFAULT_LAST_DAYS, step=1
+            "Last N days", min_value=1, max_value=730, value=DEFAULT_LAST_DAYS, step=1
         )
         start_date = st.sidebar.text_input(
             "Start date (ISO)", "", help="Optional: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
@@ -160,12 +160,12 @@ def main() -> None:
         if st.sidebar.button("Fetch from API"):
             with st.spinner("Fetching from API…"):
                 try:
-                    # Always fetch last 365 days for calculations, but filter display later
+                    # Always fetch last 730 days for calculations, but filter display later
                     df = fetch_orders_from_api(
                         base_url=base_url,
                         endpoint=endpoint,
                         api_key=api_key,
-                        last_days=365,  # Always fetch 1 year
+                        last_days=730,  # Always fetch 2 years
                         start_date=None,
                         end_date=None,
                     )
@@ -235,7 +235,7 @@ def main() -> None:
 
         email_col = "email" if "email" in order_df_full.columns else None
 
-        # --- Build per-customer lookups from full 1-year data ---
+        # --- Build per-customer lookups from full 2-year data ---
         if email_col:
             customer_first_order = order_df_full.groupby(email_col)["periodStart"].min()
             customer_all_periods = order_df_full.groupby(email_col)["periodStart"].apply(set)
@@ -253,18 +253,63 @@ def main() -> None:
         unique_periods = sorted(order_df_full["periodStart"].dropna().unique())
         all_ctypes = sorted(order_df_full["customerType"].dropna().unique())
 
+        period_meta = (
+            pd.DataFrame({"periodStart": unique_periods})
+            .dropna()
+            .drop_duplicates()
+            .sort_values("periodStart")
+        )
+        period_meta["Year"] = period_meta["periodStart"].dt.year
+        period_meta["MonthStart"] = period_meta["periodStart"].dt.to_period("M").dt.to_timestamp()
+        iso = period_meta["periodStart"].dt.isocalendar()
+        period_meta["IsoYear"] = iso["year"].astype(int)
+        period_meta["IsoWeek"] = iso["week"].astype(int)
+        period_meta["WeekKey"] = (
+            period_meta["IsoYear"].astype(str) + "-W" + period_meta["IsoWeek"].astype(str).str.zfill(2)
+        )
+
         with st.container():
             st.markdown('<div class="filter-bar">', unsafe_allow_html=True)
-            filter_col1, filter_col2 = st.columns([1, 1])
-            with filter_col1:
-                selected_periods = st.multiselect(
-                    "Filter by Period Start",
-                    options=unique_periods,
-                    default=unique_periods,
-                    format_func=lambda x: x.strftime('%m/%d/%y') if pd.notna(x) else '',
-                    key="period_filter",
+            year_col, month_col, week_col = st.columns([1, 1, 1])
+
+            available_years = sorted(period_meta["Year"].dropna().unique().tolist())
+            with year_col:
+                selected_years = st.multiselect(
+                    "Year",
+                    options=available_years,
+                    default=available_years,
+                    key="period_year_filter",
                 )
-            with filter_col2:
+
+            month_pool = period_meta[period_meta["Year"].isin(selected_years)]
+            available_months = sorted(month_pool["MonthStart"].dropna().unique().tolist())
+            with month_col:
+                selected_months = st.multiselect(
+                    "Month",
+                    options=available_months,
+                    default=available_months,
+                    format_func=lambda x: x.strftime("%Y-%m") if pd.notna(x) else "",
+                    key="period_month_filter",
+                )
+
+            week_pool = month_pool[month_pool["MonthStart"].isin(selected_months)]
+            week_pairs = (
+                week_pool[["IsoYear", "IsoWeek"]]
+                .drop_duplicates()
+                .sort_values(["IsoYear", "IsoWeek"])
+                .itertuples(index=False, name=None)
+            )
+            available_weeks = [f"{y}-W{w:02d}" for y, w in week_pairs]
+            with week_col:
+                selected_weeks = st.multiselect(
+                    "Week",
+                    options=available_weeks,
+                    default=available_weeks,
+                    key="period_week_filter",
+                )
+
+            ctype_col, _ = st.columns([1, 2])
+            with ctype_col:
                 selected_types = st.multiselect(
                     "Filter by Customer Type",
                     options=all_ctypes,
@@ -273,11 +318,27 @@ def main() -> None:
                 )
             st.markdown('</div>', unsafe_allow_html=True)
 
-        if not selected_periods:
-            st.info("Select at least one period above.")
+        if not selected_years:
+            st.info("Select at least one year above.")
+            return
+        if not selected_months:
+            st.info("Select at least one month above.")
+            return
+        if not selected_weeks:
+            st.info("Select at least one week above.")
             return
         if not selected_types:
             st.info("Select at least one customer type above.")
+            return
+
+        selected_periods = period_meta[
+            period_meta["Year"].isin(selected_years)
+            & period_meta["MonthStart"].isin(selected_months)
+            & period_meta["WeekKey"].isin(selected_weeks)
+        ]["periodStart"].tolist()
+
+        if not selected_periods:
+            st.info("No periodStart values match your Year/Month/Week filters.")
             return
 
         display_df = order_df_full[
@@ -309,7 +370,11 @@ def main() -> None:
                 )
                 total_custs = len(emails)
                 recurring_pct = recurring / total_custs * 100 if total_custs else 0
-                weeks_vals = [customer_avg_weeks.get(e) for e in emails if customer_avg_weeks.get(e) is not None]
+                weeks_vals = [
+                    customer_avg_weeks.get(e)
+                    for e in emails
+                    if pd.notna(customer_avg_weeks.get(e))
+                ]
                 avg_weeks_period = sum(weeks_vals) / len(weeks_vals) if weeks_vals else None
             else:
                 new_custs = 0
@@ -345,7 +410,11 @@ def main() -> None:
             )
             total_custs = len(filtered_emails)
             recurring_pct = recurring_count / total_custs * 100 if total_custs else 0
-            weeks_vals = [customer_avg_weeks.get(e) for e in filtered_emails if customer_avg_weeks.get(e) is not None]
+            weeks_vals = [
+                customer_avg_weeks.get(e)
+                for e in filtered_emails
+                if pd.notna(customer_avg_weeks.get(e))
+            ]
             avg_weeks_between = sum(weeks_vals) / len(weeks_vals) if weeks_vals else None
         else:
             num_new_customers = 0
@@ -354,7 +423,7 @@ def main() -> None:
 
         # --- KPI cards ---
         st.markdown('<p class="section-header">Summary</p>', unsafe_allow_html=True)
-        st.caption("* Metrics marked with * use rolling 1-year data")
+        st.caption("* Metrics marked with * use rolling 2-year data")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Revenue", f"${total_revenue:,.2f}")
         c2.metric("Total Orders", f"{total_orders:,}")
