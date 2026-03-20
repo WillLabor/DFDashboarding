@@ -71,6 +71,55 @@ def fetch_api_to_df(
     return df
 
 
+def fetch_customers_from_api(
+    base_url: str,
+    api_key: str,
+    last_order_after: str | None = None,
+    timeout: int = 60,
+) -> pd.DataFrame:
+    """Fetch customer records from /api/Customers.
+
+    Args:
+        last_order_after: ISO date string — only return customers who placed
+            an order after this date.  Leave None to fetch all customers.
+    """
+    url = base_url.rstrip("/") + "/api/Customers"
+    params: dict = {}
+    if last_order_after:
+        params["lastOrderDate"] = last_order_after
+    return fetch_api_to_df(url, params=params or None, api_key=api_key, timeout=timeout)
+
+
+def fetch_price_levels(
+    base_url: str,
+    api_key: str,
+    timeout: int = 30,
+) -> pd.DataFrame:
+    """Fetch available price levels from /api/PriceLevel.
+    
+    Returns a DataFrame with columns: id, name, markup, default
+    Use the 'id' values when calling fetch_availability_to_df().
+    """
+    url = base_url.rstrip("/") + "/api/PriceLevel"
+    return fetch_api_to_df(url, api_key=api_key, timeout=timeout)
+
+
+def fetch_availability_to_df(
+    base_url: str,
+    api_key: str,
+    price_level_id: int,
+    timeout: int = 60,
+) -> pd.DataFrame:
+    """Fetch product availability data for a specific price level ID.
+    
+    Call fetch_price_levels() first to discover valid price_level_id values.
+    priceLevel=0 (or null) returns the site's default price level.
+    """
+    url = base_url.rstrip("/") + "/api/Availability"
+    params = {"priceLevel": price_level_id}
+    return fetch_api_to_df(url, params=params, api_key=api_key, timeout=timeout)
+
+
 def save_df_csv(df: pd.DataFrame, path: str, index: bool = False) -> None:
     """Save a DataFrame to a CSV file."""
     out_path = Path(path)

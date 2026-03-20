@@ -119,6 +119,99 @@ def average_order_value_by_type_period(df: pd.DataFrame, status_filter: str | No
     return agg
 
 
+# ---------------------------------------------------------------------------
+# Customer segmentation
+# ---------------------------------------------------------------------------
+
+_SEGMENT_ACTIONS: dict[str, str] = {
+    "Champions":     "🎁 Reward: loyalty programme, early product access, referral asks",
+    "Loyal":         "⬆️  Upsell: premium bundles, subscription upgrade offer",
+    "At-Risk":       "🚨 Win-back: personal call or email, limited-time discount",
+    "Regular":       "📈 Nurture: increase frequency, recurring-order nudge",
+    "New":           "👋 Onboard: welcome series, highlight popular products",
+    "Lost":          "💌 Re-engage: 'We miss you' promo, satisfaction survey",
+    "Occasional":    "🛒 Reactivate: seasonal promotions, low-barrier offer",
+    "Never Ordered": "📣 Activate: first-order incentive, demo / intro call",
+}
+
+
+def segment_customers(customers_df: pd.DataFrame) -> pd.DataFrame:
+    """Classify customers into lifecycle segments using RFM-like logic.
+
+    Segments (evaluated in priority order):
+      Never Ordered – No lastOrder on record
+      New           – First order ≤ 90 days ago AND ≤ 2 total orders
+      Lost          – Last order > 270 days ago
+      Champions     – Recent + highly frequent + high-spend (all top-third)
+      Loyal         – Frequent + high-spend (regardless of slight recency lag)
+      At-Risk       – High value/frequency but last order > 90 days ago
+      Regular       – Ordered within 90 days with some purchase history
+      Occasional    – Has orders but doesn't fit higher tiers
+
+    Adds computed columns: days_since_last_order, customer_age_days, segment.
+    """
+    df = customers_df.copy()
+    today = pd.Timestamp.now()
+
+    for col in ("lastOrder", "firstOrder", "dateEntered"):
+        if col in df.columns:
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            if parsed.dt.tz is not None:
+                parsed = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
+            df[col] = parsed
+
+    df["totalOrders"] = pd.to_numeric(df.get("totalOrders", pd.Series(0, index=df.index)), errors="coerce").fillna(0)
+    df["totalSales"]  = pd.to_numeric(df.get("totalSales",  pd.Series(0, index=df.index)), errors="coerce").fillna(0)
+
+    if "lastOrder" in df.columns:
+        df["days_since_last_order"] = (today - df["lastOrder"]).dt.days
+        df["days_since_last_order"] = df["days_since_last_order"].where(df["lastOrder"].notna())
+    else:
+        df["days_since_last_order"] = pd.NA
+
+    if "firstOrder" in df.columns:
+        df["customer_age_days"] = (today - df["firstOrder"]).dt.days
+        df["customer_age_days"] = df["customer_age_days"].where(df["firstOrder"].notna())
+    else:
+        df["customer_age_days"] = pd.NA
+
+    # Percentile thresholds — computed only from customers who have ordered
+    active = df[(df["totalOrders"] > 0) & df["days_since_last_order"].notna()]
+    if len(active) < 5:
+        df["segment"] = "Insufficient Data"
+        return df
+
+    r_p33 = float(active["days_since_last_order"].quantile(0.33))
+    f_p66 = float(active["totalOrders"].quantile(0.66))
+    m_p66 = float(active["totalSales"].quantile(0.66))
+
+    def _classify(row) -> str:
+        if pd.isna(row.get("lastOrder")) or pd.isna(row.get("days_since_last_order")):
+            return "Never Ordered"
+
+        r   = float(row["days_since_last_order"])
+        f   = float(row["totalOrders"])
+        m   = float(row["totalSales"])
+        age = row.get("customer_age_days")
+
+        if pd.notna(age) and float(age) <= 90 and f <= 2:
+            return "New"
+        if r > 270:
+            return "Lost"
+        if r <= r_p33 and f >= f_p66 and m >= m_p66:
+            return "Champions"
+        if f >= f_p66 and m >= m_p66 and r <= 180:
+            return "Loyal"
+        if (m >= m_p66 or f >= f_p66) and r > 90:
+            return "At-Risk"
+        if r <= 90 and f >= 1:
+            return "Regular"
+        return "Occasional"
+
+    df["segment"] = df.apply(_classify, axis=1)
+    return df
+
+
 def save_aggregation(df: pd.DataFrame, out_path: str) -> None:
     """Save aggregated DataFrame to CSV."""
     out = Path(out_path)
