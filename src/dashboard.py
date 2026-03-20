@@ -14,6 +14,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import warnings
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -546,7 +547,6 @@ def main() -> None:
 
         # --- AG Grid metrics table ---
         st.markdown('<p class="section-header">Metrics by Period & Customer Type</p>', unsafe_allow_html=True)
-        from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
         grid_df = metrics_df.copy()
         grid_df["Period Start"] = grid_df["Period Start"].dt.strftime('%m/%d/%y')
@@ -666,11 +666,6 @@ def main() -> None:
                 _render_comparison_tab(raw_wow, pct_wow, "Revenue", "wow")
             with comp_tab2:
                 raw_mom, pct_mom = _build_comparison(comp_df, "ME")
-                _render_comparison_tab(raw_mom, pct_mom, "Revenue", "mom")
-            with comp_tab3:
-                raw_yoy, pct_yoy = _build_comparison(comp_df, "YE")
-                _render_comparison_tab(raw_yoy, pct_yoy, "Revenue", "yoy")
-
                 _render_comparison_tab(raw_mom, pct_mom, "Revenue", "mom")
             with comp_tab3:
                 raw_yoy, pct_yoy = _build_comparison(comp_df, "YE")
