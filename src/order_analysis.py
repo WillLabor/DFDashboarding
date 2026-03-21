@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Optional
 
+import numpy as np
 import pandas as pd
 
 
@@ -209,6 +210,53 @@ def segment_customers(customers_df: pd.DataFrame) -> pd.DataFrame:
         return "Occasional"
 
     df["segment"] = df.apply(_classify, axis=1)
+    return df
+
+
+def calculate_clv(seg_df: pd.DataFrame, projection_months: int = 12) -> pd.DataFrame:
+    """Add Customer Lifetime Value columns to a segmented customer DataFrame.
+
+    Uses the BG/NBD-lite formula: Projected CLV = AOV × purchase_rate × projection_months.
+    All inputs come from the existing customer API fields (totalOrders, totalSales,
+    firstOrder, lastOrder) plus the computed columns from segment_customers().
+
+    Added columns
+    -------------
+    historical_clv      Actual spend to date (= totalSales)
+    avg_order_value     Average spend per order
+    orders_per_month    Monthly purchase frequency over the customer's lifetime
+    projected_clv       Forward-looking CLV for ``projection_months`` months
+    clv_tier            "High" / "Medium" / "Low" / "No Orders" (tercile among active customers)
+    """
+    df = seg_df.copy()
+
+    df["historical_clv"] = pd.to_numeric(df.get("totalSales", 0), errors="coerce").fillna(0).clip(lower=0)
+    orders = pd.to_numeric(df.get("totalOrders", 0), errors="coerce").fillna(0)
+
+    df["avg_order_value"] = np.where(orders > 0, df["historical_clv"] / orders, 0.0)
+
+    age_months = pd.to_numeric(df.get("customer_age_days", np.nan), errors="coerce").fillna(0) / 30.44
+    df["orders_per_month"] = np.where(age_months > 0.5, orders / age_months, 0.0)
+
+    df["projected_clv"] = (df["avg_order_value"] * df["orders_per_month"] * projection_months).clip(lower=0)
+
+    active_mask = orders > 0
+    if active_mask.sum() >= 3:
+        p33 = float(df.loc[active_mask, "projected_clv"].quantile(0.33))
+        p66 = float(df.loc[active_mask, "projected_clv"].quantile(0.66))
+    else:
+        p33, p66 = 0.0, 0.0
+
+    df["clv_tier"] = np.select(
+        [
+            ~active_mask,
+            df["projected_clv"] >= p66,
+            df["projected_clv"] >= p33,
+        ],
+        ["No Orders", "High", "Medium"],
+        default="Low",
+    )
+
     return df
 
 

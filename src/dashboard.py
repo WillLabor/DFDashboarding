@@ -25,12 +25,25 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_loader import fetch_api_to_df, fetch_price_levels, fetch_availability_to_df, fetch_customers_from_api
-from src.order_analysis import average_order_value_by_type_period
+from src.order_analysis import average_order_value_by_type_period, calculate_clv
+from src.ml_experiments import run_customer_ml
 
 DEFAULT_BASE_URL = "https://data-dev.localfoodmarketplace.com"
 DEFAULT_ENDPOINT = "/api/Orders"
 DEFAULT_API_KEY = "158d2724-fa51-4f7d-be0e-682e4e2860dc"
 DEFAULT_LAST_DAYS = 730
+
+SEGMENT_COLORS = {
+    "Champions":          "#10b981",
+    "Loyal":              "#3b82f6",
+    "At-Risk":            "#f59e0b",
+    "Regular":            "#8b5cf6",
+    "New":                "#06b6d4",
+    "Lost":               "#ef4444",
+    "Occasional":         "#94a3b8",
+    "Never Ordered":      "#475569",
+    "Insufficient Data":  "#cbd5e1",
+}
 
 
 def _compute_date_range(
@@ -138,11 +151,14 @@ def main() -> None:
         st.session_state.availability_df = None
     if "customers_df" not in st.session_state:
         st.session_state.customers_df = None
+    if "ml_results" not in st.session_state:
+        st.session_state.ml_results = None
 
     df = st.session_state.df
     price_levels_df = st.session_state.price_levels_df
     availability_df = st.session_state.availability_df
     customers_df = st.session_state.customers_df
+    ml_results = st.session_state.ml_results
 
     if source == "API":
         st.sidebar.header("API settings")
@@ -295,9 +311,39 @@ def main() -> None:
 
     view = st.sidebar.selectbox(
         "View",
-        ["Preview", "Order value analysis", "Customer Segments", "Product Trends", "Product Availability"],
+        ["Preview", "Order value analysis", "Customer Segments", "Customer LTV", "Product Trends", "Product Availability"],
         index=default_view_index,
     )
+
+    # ── ML Scoring sidebar (Customer Segments only) ─────────────────────────
+    if view == "Customer Segments" and has_customers:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🤖 ML Scoring")
+        if st.sidebar.button("Run ML Scoring", help="Train churn-risk & upgrade-potential models on loaded customers"):
+            from src.order_analysis import segment_customers
+            with st.spinner("Training models and scoring customers… (~10 sec)"):
+                try:
+                    seg_for_ml = segment_customers(customers_df)
+                    ml_res = run_customer_ml(seg_for_ml)
+                    st.session_state.ml_results = ml_res
+                    ml_results = ml_res
+                    churn_auc = ml_res.get("churn_auc", None)
+                    upgrade_auc = ml_res.get("upgrade_auc", None)
+                    msg = "ML scoring complete!"
+                    if churn_auc:
+                        msg += f"  Churn AUC: {churn_auc:.2f}"
+                    if upgrade_auc:
+                        msg += f"  Upgrade AUC: {upgrade_auc:.2f}"
+                    st.sidebar.success(msg)
+                except Exception as exc:
+                    st.sidebar.error(f"ML error: {exc}")
+        if ml_results is not None:
+            churn_auc = ml_results.get("churn_auc")
+            upgrade_auc = ml_results.get("upgrade_auc")
+            if churn_auc:
+                st.sidebar.caption(f"Churn model ROC-AUC: **{churn_auc:.2f}**")
+            if upgrade_auc:
+                st.sidebar.caption(f"Upgrade model ROC-AUC: **{upgrade_auc:.2f}**")
 
     if view == "Order value analysis" and has_orders:
         # Add status filter if orderStatus column exists
@@ -676,17 +722,7 @@ def main() -> None:
 
         dark = st.sidebar.checkbox("Dark mode", value=False, key="dark_cust")
 
-        SEGMENT_COLORS = {
-            "Champions":     "#10b981",
-            "Loyal":         "#3b82f6",
-            "At-Risk":       "#f59e0b",
-            "Regular":       "#8b5cf6",
-            "New":           "#06b6d4",
-            "Lost":          "#ef4444",
-            "Occasional":    "#94a3b8",
-            "Never Ordered": "#475569",
-            "Insufficient Data": "#cbd5e1",
-        }
+        # SEGMENT_COLORS is defined at module level
         SEGMENT_ACTIONS = {
             "Champions":     "🎁 Reward: loyalty programme, early product access, referral asks",
             "Loyal":         "⬆️  Upsell: premium bundles, subscription upgrade offer",
@@ -939,6 +975,130 @@ def main() -> None:
                 else:
                     st.info("No candidates found for this segment.")
 
+        # ── ML Insights ───────────────────────────────────────────────────────
+        if ml_results is not None:
+            scored_df = ml_results.get("scored_df")
+            churn_imp  = ml_results.get("churn_importances")
+            upgrade_imp = ml_results.get("upgrade_importances")
+
+            st.markdown('<p class="section-header">🤖 ML Insights: Churn Risk & Upgrade Potential</p>', unsafe_allow_html=True)
+
+            # Model quality
+            auc_col1, auc_col2 = st.columns(2)
+            with auc_col1:
+                if "churn_auc" in ml_results:
+                    st.metric("Churn Model ROC-AUC", f"{ml_results['churn_auc']:.2f}",
+                              help="1.0 = perfect, 0.5 = random. Above 0.75 is good.")
+            with auc_col2:
+                if "upgrade_auc" in ml_results:
+                    st.metric("Upgrade Model ROC-AUC", f"{ml_results['upgrade_auc']:.2f}",
+                              help="1.0 = perfect, 0.5 = random. Above 0.75 is good.")
+
+            # Feature importance charts
+            if churn_imp is not None or upgrade_imp is not None:
+                fi_col1, fi_col2 = st.columns(2)
+                with fi_col1:
+                    if churn_imp is not None:
+                        fig_ci = px.bar(
+                            x=churn_imp.values,
+                            y=churn_imp.index,
+                            orientation="h",
+                            color_discrete_sequence=["#ef4444"],
+                            template="plotly_dark" if dark else "plotly_white",
+                            title="Churn Risk — Feature Importance",
+                            labels={"x": "Importance", "y": ""},
+                        )
+                        fig_ci.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=300)
+                        st.plotly_chart(fig_ci, use_container_width=True)
+                with fi_col2:
+                    if upgrade_imp is not None:
+                        fig_ui = px.bar(
+                            x=upgrade_imp.values,
+                            y=upgrade_imp.index,
+                            orientation="h",
+                            color_discrete_sequence=["#10b981"],
+                            template="plotly_dark" if dark else "plotly_white",
+                            title="Upgrade Potential — Feature Importance",
+                            labels={"x": "Importance", "y": ""},
+                        )
+                        fig_ui.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=300)
+                        st.plotly_chart(fig_ui, use_container_width=True)
+
+            if scored_df is not None and "churn_risk_score" in scored_df.columns:
+                # ── Top win-back targets: NOT already Lost, high churn risk, high value
+                st.markdown('<p class="section-header">🚨 Top Win-Back Targets</p>', unsafe_allow_html=True)
+                st.caption("High churn risk score + high lifetime sales — prioritise these for outreach first.")
+                winback = scored_df[
+                    ~scored_df["segment"].isin(["Lost", "Never Ordered"]) &
+                    scored_df["churn_risk_score"].notna()
+                ].copy()
+                winback = winback.nlargest(20, "churn_risk_score")
+                wb_cols = [c for c in ["fullName", "email", "custType", "segment",
+                                        "churn_risk_score", "upgrade_potential_score",
+                                        "totalOrders", "totalSales", "days_since_last_order"] if c in winback.columns]
+                winback_display = winback[wb_cols].round(1)
+                gb_wb = GridOptionsBuilder.from_dataframe(winback_display)
+                gb_wb.configure_default_column(resizable=True, sortable=True, filter=True)
+                gb_wb.configure_column("churn_risk_score", header_name="Churn Risk (0-100)")
+                if "upgrade_potential_score" in wb_cols:
+                    gb_wb.configure_column("upgrade_potential_score", header_name="Upgrade Potential (0-100)")
+                gb_wb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=10)
+                AgGrid(winback_display, gridOptions=gb_wb.build(),
+                       update_mode=GridUpdateMode.NO_UPDATE, height=340, use_container_width=True)
+
+                # ── Top upsell / upgrade candidates
+                if "upgrade_potential_score" in scored_df.columns:
+                    st.markdown('<p class="section-header">⬆️ Top Upsell / Upgrade Candidates</p>', unsafe_allow_html=True)
+                    st.caption("High upgrade potential but not yet Champions/Loyal — nudge these toward the next tier.")
+                    upsell = scored_df[
+                        ~scored_df["segment"].isin(["Champions", "Loyal", "Lost", "Never Ordered"]) &
+                        scored_df["upgrade_potential_score"].notna()
+                    ].copy()
+                    upsell = upsell.nlargest(20, "upgrade_potential_score")
+                    us_cols = [c for c in ["fullName", "email", "custType", "segment",
+                                            "upgrade_potential_score", "churn_risk_score",
+                                            "totalOrders", "totalSales", "days_since_last_order"] if c in upsell.columns]
+                    upsell_display = upsell[us_cols].round(1)
+                    gb_us = GridOptionsBuilder.from_dataframe(upsell_display)
+                    gb_us.configure_default_column(resizable=True, sortable=True, filter=True)
+                    gb_us.configure_column("upgrade_potential_score", header_name="Upgrade Potential (0-100)")
+                    if "churn_risk_score" in us_cols:
+                        gb_us.configure_column("churn_risk_score", header_name="Churn Risk (0-100)")
+                    gb_us.configure_pagination(paginationAutoPageSize=False, paginationPageSize=10)
+                    AgGrid(upsell_display, gridOptions=gb_us.build(),
+                           update_mode=GridUpdateMode.NO_UPDATE, height=340, use_container_width=True)
+
+                # ── Score distribution scatter
+                st.markdown('<p class="section-header">Score Distribution by Segment</p>', unsafe_allow_html=True)
+                scatter_df = scored_df[
+                    scored_df["churn_risk_score"].notna() &
+                    scored_df.get("upgrade_potential_score", pd.Series(dtype=float)).notna()
+                ].copy() if "upgrade_potential_score" in scored_df.columns else None
+
+                if scatter_df is not None and not scatter_df.empty:
+                    hover_name = "fullName" if "fullName" in scatter_df.columns else None
+                    fig_sc = px.scatter(
+                        scatter_df,
+                        x="churn_risk_score",
+                        y="upgrade_potential_score",
+                        color="segment",
+                        color_discrete_map=SEGMENT_COLORS,
+                        hover_name=hover_name,
+                        hover_data={c: True for c in ["totalSales", "totalOrders", "days_since_last_order"] if c in scatter_df.columns},
+                        template="plotly_dark" if dark else "plotly_white",
+                        labels={"churn_risk_score": "Churn Risk (0-100)", "upgrade_potential_score": "Upgrade Potential (0-100)"},
+                        title="Churn Risk vs Upgrade Potential — each dot is a customer",
+                        opacity=0.75,
+                    )
+                    fig_sc.add_vline(x=50, line_dash="dash", line_color="gray", opacity=0.4)
+                    fig_sc.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.4)
+                    fig_sc.update_layout(height=500, margin=dict(l=0, r=0, t=40, b=0))
+                    st.plotly_chart(fig_sc, use_container_width=True)
+                    st.caption("Top-right quadrant = high upgrade potential + low churn risk → Champions-in-waiting. "
+                               "Top-left = high upgrade potential but high churn risk → act fast.")
+        else:
+            st.info("Click **Run ML Scoring** in the sidebar to generate churn risk and upgrade potential scores for every customer.")
+
     elif view == "Product Trends":
         if df is None:
             st.info("Fetch order data first from the API.")
@@ -1082,6 +1242,168 @@ def main() -> None:
                 height=400,
             )
             st.plotly_chart(fig_product, use_container_width=True)
+
+    elif view == "Customer LTV":
+        dark = st.sidebar.checkbox("Dark mode", value=False, key="dark_ltv")
+        tpl  = "plotly_dark" if dark else "plotly_white"
+
+        if not has_customers:
+            st.title("💰 Customer Lifetime Value")
+            st.info("Fetch your customers first using the **Fetch Customers** button in the sidebar.")
+            return
+
+        # ── Sidebar controls ──────────────────────────────────────────────────
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("LTV Projection")
+        proj_months = st.sidebar.select_slider(
+            "Projection window",
+            options=[3, 6, 12, 24, 36],
+            value=12,
+            help="How many months ahead to project each customer's spend.",
+        )
+
+        # ── Compute ───────────────────────────────────────────────────────────
+        from src.order_analysis import segment_customers
+        seg_df  = segment_customers(customers_df)
+        clv_df  = calculate_clv(seg_df, projection_months=proj_months)
+
+        active  = clv_df[clv_df["totalOrders"] > 0].copy()
+
+        st.title("💰 Customer Lifetime Value")
+        st.caption(
+            f"Based on {len(clv_df):,} customers · "
+            f"{len(active):,} with order history · "
+            f"{proj_months}-month projection window"
+        )
+
+        # ── KPI row ───────────────────────────────────────────────────────────
+        k1, k2, k3, k4, k5 = st.columns(5)
+        total_portfolio = active["projected_clv"].sum()
+        avg_clv         = active["projected_clv"].mean()
+        median_clv      = active["projected_clv"].median()
+        high_count      = (active["clv_tier"] == "High").sum()
+        total_historical = active["historical_clv"].sum()
+
+        k1.metric("Portfolio Projected CLV",  f"${total_portfolio:,.0f}",
+                  help=f"Sum of all customers' {proj_months}-month projected spend")
+        k2.metric("Avg Customer CLV",          f"${avg_clv:,.0f}")
+        k3.metric("Median Customer CLV",       f"${median_clv:,.0f}")
+        k4.metric("High-Tier Customers",       f"{high_count:,}",
+                  help="Top third of customers by projected CLV")
+        k5.metric("Total Historical Spend",    f"${total_historical:,.0f}")
+
+        st.markdown("---")
+
+        # ── Charts row ────────────────────────────────────────────────────────
+        col_hist, col_seg = st.columns(2)
+
+        with col_hist:
+            fig_dist = px.histogram(
+                active,
+                x="projected_clv",
+                color="clv_tier",
+                nbins=40,
+                color_discrete_map={"High": "#10b981", "Medium": "#3b82f6", "Low": "#f59e0b"},
+                template=tpl,
+                labels={"projected_clv": f"Projected CLV ({proj_months}m, $)", "count": "Customers"},
+                title="CLV Distribution by Tier",
+            )
+            fig_dist.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=340, bargap=0.05)
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+        with col_seg:
+            seg_clv = (
+                active.groupby("segment")["projected_clv"]
+                .agg(["mean", "sum", "count"])
+                .rename(columns={"mean": "Avg CLV", "sum": "Total CLV", "count": "Customers"})
+                .reset_index()
+                .sort_values("Avg CLV", ascending=False)
+            )
+            fig_seg = px.bar(
+                seg_clv,
+                x="segment",
+                y="Avg CLV",
+                color="segment",
+                color_discrete_map=SEGMENT_COLORS,
+                text="Customers",
+                hover_data={"Total CLV": ":.0f", "Avg CLV": ":.0f", "Customers": True},
+                template=tpl,
+                labels={"Avg CLV": f"Avg Projected CLV ({proj_months}m, $)", "segment": ""},
+                title="Average CLV by Segment",
+            )
+            fig_seg.update_traces(texttemplate="%{text} customers", textposition="outside")
+            fig_seg.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=340, showlegend=False)
+            st.plotly_chart(fig_seg, use_container_width=True)
+
+        # ── AOV vs Purchase Rate scatter ──────────────────────────────────────
+        st.markdown('<p class="section-header">AOV vs Purchase Frequency</p>', unsafe_allow_html=True)
+        hover_name = "fullName" if "fullName" in active.columns else None
+        fig_scatter = px.scatter(
+            active,
+            x="orders_per_month",
+            y="avg_order_value",
+            size="historical_clv",
+            color="segment",
+            color_discrete_map=SEGMENT_COLORS,
+            hover_name=hover_name,
+            hover_data={c: True for c in ["totalOrders", "totalSales", "projected_clv", "clv_tier"] if c in active.columns},
+            size_max=40,
+            template=tpl,
+            labels={"orders_per_month": "Orders / Month", "avg_order_value": "Avg Order Value ($)"},
+            title=f"Bubble size = historical spend · each dot is a customer",
+            opacity=0.7,
+        )
+        fig_scatter.update_layout(height=450, margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.caption(
+            "Top-right = high value + high frequency → your best CLV customers. "
+            "Top-left = high AOV but infrequent → re-engagement opportunities."
+        )
+
+        # ── Segment CLV summary table ─────────────────────────────────────────
+        st.markdown('<p class="section-header">CLV Summary by Segment</p>', unsafe_allow_html=True)
+        seg_summary = (
+            active.groupby("segment").agg(
+                Customers=("projected_clv", "count"),
+                Avg_Historical_CLV=("historical_clv", "mean"),
+                Avg_Projected_CLV=("projected_clv", "mean"),
+                Total_Projected_CLV=("projected_clv", "sum"),
+                Avg_AOV=("avg_order_value", "mean"),
+                Avg_Orders_Per_Month=("orders_per_month", "mean"),
+            )
+            .round(2)
+            .reset_index()
+            .sort_values("Total_Projected_CLV", ascending=False)
+        )
+        gb_ss = GridOptionsBuilder.from_dataframe(seg_summary)
+        gb_ss.configure_default_column(resizable=True, sortable=True, filter=True)
+        gb_ss.configure_column("Avg_Historical_CLV",    header_name="Avg Historical CLV ($)")
+        gb_ss.configure_column("Avg_Projected_CLV",     header_name=f"Avg Projected CLV {proj_months}m ($)")
+        gb_ss.configure_column("Total_Projected_CLV",   header_name=f"Total Projected CLV {proj_months}m ($)")
+        gb_ss.configure_column("Avg_AOV",               header_name="Avg Order Value ($)")
+        gb_ss.configure_column("Avg_Orders_Per_Month",  header_name="Avg Orders / Month")
+        AgGrid(seg_summary, gridOptions=gb_ss.build(),
+               update_mode=GridUpdateMode.NO_UPDATE, height=280, use_container_width=True)
+
+        # ── Full customer CLV table ────────────────────────────────────────────
+        st.markdown('<p class="section-header">All Customers — CLV Breakdown</p>', unsafe_allow_html=True)
+        clv_cols = [c for c in [
+            "fullName", "email", "custType", "segment", "clv_tier",
+            "historical_clv", "projected_clv", "avg_order_value",
+            "orders_per_month", "totalOrders", "days_since_last_order",
+        ] if c in clv_df.columns]
+        clv_display = clv_df[clv_cols].sort_values("projected_clv", ascending=False).round(2)
+        gb_clv = GridOptionsBuilder.from_dataframe(clv_display)
+        gb_clv.configure_default_column(resizable=True, sortable=True, filter=True)
+        gb_clv.configure_column("historical_clv",   header_name="Historical CLV ($)")
+        gb_clv.configure_column("projected_clv",    header_name=f"Projected CLV {proj_months}m ($)")
+        gb_clv.configure_column("avg_order_value",  header_name="Avg Order Value ($)")
+        gb_clv.configure_column("orders_per_month", header_name="Orders / Month")
+        gb_clv.configure_column("days_since_last_order", header_name="Days Since Last Order")
+        gb_clv.configure_column("clv_tier",         header_name="CLV Tier")
+        gb_clv.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
+        AgGrid(clv_display, gridOptions=gb_clv.build(),
+               update_mode=GridUpdateMode.NO_UPDATE, height=480, use_container_width=True)
 
     elif view == "Product Availability":
         dark = st.sidebar.checkbox("Dark mode", value=False, key="dark_avail")
