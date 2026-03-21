@@ -100,25 +100,46 @@ def fetch_orders_from_api(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Orders Dashboard", layout="wide", page_icon="📦")
+    st.set_page_config(page_title="Delivered Fresh · Analytics", layout="wide", page_icon="🌿")
 
     # --- Modern CSS ---
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
     [data-testid="stMetric"] {
-        background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-        border: 1px solid #e2e8f0;
+        background: linear-gradient(135deg, #f6faf4 0%, #eef6eb 100%);
+        border: 1px solid #c3ddb8;
+        border-top: 3px solid #4a7c3f;
         border-radius: 12px;
         padding: 16px 20px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        box-shadow: 0 1px 3px rgba(74,124,63,0.10);
     }
-    [data-testid="stMetricLabel"] { font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
-    [data-testid="stMetricValue"] { font-size: 1.6rem; font-weight: 700; color: #1e293b; }
-    .section-header { font-size: 1rem; font-weight: 600; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; margin: 1.5rem 0 0.75rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.4rem; }
-    .filter-bar { background: #f8fafc; border-radius: 12px; padding: 16px; border: 1px solid #e2e8f0; margin-bottom: 1rem; }
+    [data-testid="stMetricLabel"] { font-size: 0.75rem; font-weight: 600; color: #4a7c3f; text-transform: uppercase; letter-spacing: 0.05em; }
+    [data-testid="stMetricValue"] { font-size: 1.6rem; font-weight: 700; color: #1e3d18; }
+    [data-testid="stMetricDelta"] { font-size: 0.85rem; }
+    .section-header { font-size: 1rem; font-weight: 600; color: #4a7c3f; text-transform: uppercase; letter-spacing: 0.08em; margin: 1.5rem 0 0.75rem; border-bottom: 2px solid #c3ddb8; padding-bottom: 0.4rem; }
+    .filter-bar { background: #f6faf4; border-radius: 12px; padding: 16px; border: 1px solid #c3ddb8; margin-bottom: 1rem; }
+    [data-testid="stSidebar"] { background: #1a2e14 !important; }
+    [data-testid="stSidebar"] * { color: #ffffff !important; }
+    [data-testid="stSidebar"] .stButton > button {
+        background: #4a7c3f !important; color: #fff !important;
+        border: none !important; border-radius: 8px !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover { background: #3a6231 !important; }
+    [data-testid="stSidebar"] input, [data-testid="stSidebar"] select {
+        background: #243d1c !important; color: #ffffff !important;
+        border-color: #4a7c3f !important;
+    }
+    div[data-baseweb="select"] { border-color: #4a7c3f !important; }
+    .stTabs [data-baseweb="tab-list"] { border-bottom-color: #c3ddb8; }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        color: #4a7c3f !important; border-bottom-color: #4a7c3f !important;
+        font-weight: 700;
+    }
+    .stProgress > div > div { background-color: #4a7c3f !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -130,15 +151,41 @@ def main() -> None:
     if dark:
         st.markdown("""
         <style>
-        html, body, [class*="css"] { background-color: #0e1117 !important; color: #f1f5f9 !important; }
-        [data-testid="stMetric"] { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%) !important; border-color: #334155 !important; }
-        [data-testid="stMetricLabel"] { color: #94a3b8 !important; }
-        [data-testid="stMetricValue"] { color: #f1f5f9 !important; }
-        .filter-bar { background: #1e293b !important; border-color: #334155 !important; }
-        .section-header { color: #94a3b8 !important; border-color: #334155 !important; }
+        html, body, [class*="css"] { background-color: #0a140a !important; color: #d4edca !important; }
+        [data-testid="stMetric"] { background: linear-gradient(135deg, #162212 0%, #0a140a 100%) !important; border-color: #3a6231 !important; border-top-color: #5a9348 !important; }
+        [data-testid="stMetricLabel"] { color: #5a9348 !important; }
+        [data-testid="stMetricValue"] { color: #d4edca !important; }
+        .filter-bar { background: #162212 !important; border-color: #3a6231 !important; }
+        .section-header { color: #5a9348 !important; border-color: #3a6231 !important; }
         </style>""", unsafe_allow_html=True)
 
-    st.title("📦 Orders Dashboard")
+    # ── Branded sidebar header ───────────────────────────────────────────────
+    st.sidebar.markdown(
+        """
+        <div style="text-align:center; padding: 0.5rem 0 1rem;">
+          <img src="https://images.squarespace-cdn.com/content/v1/655cf2b8c8ee2227cde11a60/05f282e9-37e2-43c5-940f-5155cac1c3e3/wsl-DF-white.png"
+               style="width:140px; opacity:0.92;" alt="Delivered Fresh">
+          <div style="font-size:0.65rem; color:#6dab5a; letter-spacing:0.12em; text-transform:uppercase; margin-top:0.4rem;">Analytics Dashboard</div>
+        </div>
+        <hr style="border-color:#2e4d26; margin:0 0 0.5rem;">
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Page header ─────────────────────────────────────────────────────────
+    st.markdown(
+        """
+        <div style="background:#1a2e14; border-radius:12px; display:flex; align-items:center; gap:1.1rem; padding:0.8rem 1.4rem; margin-bottom:1.2rem; box-shadow:0 2px 8px rgba(0,0,0,0.18);">
+          <img src="https://images.squarespace-cdn.com/content/v1/655cf2b8c8ee2227cde11a60/05f282e9-37e2-43c5-940f-5155cac1c3e3/wsl-DF-white.png"
+               style="height:46px; flex-shrink:0;" alt="Delivered Fresh">
+          <div style="border-left:1px solid #3a6231; padding-left:1.1rem;">
+            <div style="font-size:1.45rem; font-weight:800; color:#ffffff; line-height:1.1;">Delivered Fresh</div>
+            <div style="font-size:0.72rem; color:#8fce74; letter-spacing:0.12em; text-transform:uppercase; font-weight:600; margin-top:0.2rem;">Order &amp; Customer Analytics</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     source = st.sidebar.radio("Data source", ["API", "CSV upload"], index=0)
 

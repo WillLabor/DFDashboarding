@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Delivered Fresh — Show & Tell</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0d1a0d;
+    color: #f1f5f9;
+    height: 100vh;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  .deck { width: 100vw; height: 100vh; position: relative; }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 5vw 7vw;
+    opacity: 0;
+    transform: translateX(60px);
+    transition: opacity .35s ease, transform .35s ease;
+    pointer-events: none;
+    text-align: center;
+  }
+  .slide.active {
+    opacity: 1;
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+  .slide.out {
+    opacity: 0;
+    transform: translateX(-60px);
+  }
+
+  /* ── Slide themes ── */
+  .slide-title   {
+    background:
+      linear-gradient(135deg, rgba(8,20,6,0.90) 0%, rgba(4,10,3,0.95) 100%),
+      url('https://images.squarespace-cdn.com/content/v1/655cf2b8c8ee2227cde11a60/4b58ab66-4d02-411c-a2cf-9bfc6a49f5c9/grilledcheese.jpeg?format=1500w') center/cover no-repeat;
+  }
+  .slide-context { background: linear-gradient(135deg, #1a3d0f 0%, #0d1a0d 100%); }
+  .slide-problem { background: linear-gradient(135deg, #3d200a 0%, #0d1a0d 100%); }
+  .slide-built   { background: linear-gradient(135deg, #1a2d12 0%, #0d1a0d 100%); }
+  .slide-answers { background: linear-gradient(135deg, #163522 0%, #0d1a0d 100%); }
+  .slide-demo    { background: linear-gradient(135deg, #1e3814 0%, #0d1a0d 100%); }
+  .slide-qa      { background: linear-gradient(135deg, #2a3a18 0%, #0d1a0d 100%); }
+
+  /* ── Typography ── */
+  .eyebrow {
+    font-size: clamp(.7rem, 1.2vw, .95rem);
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: #64748b;
+    margin-bottom: 1rem;
+  }
+  h1 {
+    font-size: clamp(2rem, 5vw, 4rem);
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 1.2rem;
+  }
+  h2 {
+    font-size: clamp(1.4rem, 3vw, 2.4rem);
+    font-weight: 700;
+    line-height: 1.2;
+    margin-bottom: 1.4rem;
+  }
+  .subtitle {
+    font-size: clamp(.95rem, 1.8vw, 1.3rem);
+    color: #94a3b8;
+    max-width: 680px;
+    line-height: 1.6;
+  }
+  .tag {
+    display: inline-block;
+    background: #4a7c3f;
+    color: #fff;
+    font-size: .75rem;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: .25rem .7rem;
+    border-radius: 999px;
+    margin-bottom: 1.2rem;
+  }
+
+  /* ── Layouts ── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2.5rem;
+    width: 100%;
+    max-width: 960px;
+    text-align: left;
+  }
+  .card {
+    background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 1rem;
+    padding: 1.5rem 1.8rem;
+  }
+  .card h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #e2e8f0;
+    margin-bottom: .7rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+  .card p, .card li {
+    font-size: .88rem;
+    color: #94a3b8;
+    line-height: 1.6;
+  }
+  .card ul { padding-left: 1.1rem; }
+  .card li { margin-bottom: .25rem; }
+
+  .pill-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .7rem;
+    justify-content: center;
+    margin-top: 1.2rem;
+  }
+  .pill {
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 999px;
+    padding: .4rem 1.1rem;
+    font-size: .82rem;
+    color: #cbd5e1;
+  }
+  .pill.green  { border-color: #5a9348; color: #5a9348; }
+  .pill.blue   { border-color: #3b82f6; color: #3b82f6; }
+  .pill.amber  { border-color: #c17f24; color: #c17f24; }
+  .pill.purple { border-color: #8b5cf6; color: #8b5cf6; }
+  .pill.red    { border-color: #ef4444; color: #ef4444; }
+
+  .big-q {
+    font-size: clamp(1rem, 2.2vw, 1.5rem);
+    color: #c17f24;
+    font-style: italic;
+    margin: .5rem 0;
+    line-height: 1.4;
+  }
+
+  .feature-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    width: 100%;
+    max-width: 900px;
+    text-align: left;
+  }
+  .feature-item {
+    background: rgba(255,255,255,.04);
+    border-left: 3px solid #4a7c3f;
+    padding: .8rem 1rem;
+    border-radius: 0 .5rem .5rem 0;
+  }
+  .feature-item.blue   { border-left-color: #3b82f6; }
+  .feature-item.amber  { border-left-color: #c17f24; }
+  .feature-item.purple { border-left-color: #8b5cf6; }
+  .feature-item.red    { border-left-color: #ef4444; }
+  .feature-item .title { font-size: .85rem; font-weight: 700; color: #e2e8f0; margin-bottom: .25rem; }
+  .feature-item .desc  { font-size: .78rem; color: #64748b; line-height: 1.4; }
+
+  /* ── Progress bar ── */
+  #progress {
+    position: fixed;
+    bottom: 0; left: 0;
+    height: 3px;
+    background: #4a7c3f;
+    transition: width .35s ease;
+    z-index: 100;
+  }
+  #counter {
+    position: fixed;
+    bottom: 1rem; right: 1.5rem;
+    font-size: .75rem;
+    color: #475569;
+    z-index: 100;
+  }
+  #nav-hint {
+    position: fixed;
+    bottom: 1rem; left: 50%;
+    transform: translateX(-50%);
+    font-size: .72rem;
+    color: #334155;
+    z-index: 100;
+    pointer-events: none;
+    transition: opacity 2s ease;
+  }
+
+  /* Divider line */
+  .divider { width: 60px; height: 3px; background: #4a7c3f; border-radius: 2px; margin: 1rem auto; }
+
+  /* ── What We Built grid ── */
+  .ww-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: .9rem;
+    width: 100%;
+    max-width: 1100px;
+  }
+  .ww-card {
+    background: rgba(255,255,255,.04);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: .9rem;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    text-align: left;
+    transition: transform .2s, border-color .2s;
+  }
+  .ww-card:hover { transform: translateY(-3px); border-color: rgba(255,255,255,.18); }
+  .ww-preview {
+    padding: .7rem .7rem .5rem;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .ww-preview svg { width: 100%; height: auto; display: block; }
+  .ww-preview-blue   { background: rgba(59,130,246,.08); }
+  .ww-preview-amber  { background: rgba(245,158,11,.08); }
+  .ww-preview-purple { background: rgba(139,92,246,.08); }
+  .ww-preview-red    { background: rgba(239,68,68,.08);  }
+  .ww-preview-green  { background: rgba(74,124,63,.12); }
+  .ww-label {
+    font-size: .78rem;
+    font-weight: 700;
+    color: #e2e8f0;
+    padding: .6rem .75rem .3rem;
+    line-height: 1.3;
+  }
+  .ww-text {
+    font-size: .72rem;
+    color: #64748b;
+    padding: 0 .75rem .75rem;
+    line-height: 1.5;
+    flex: 1;
+  }
+
+  /* ── Brand watermark logo ── */
+  #brand-logo {
+    position: fixed;
+    bottom: 1.1rem;
+    left: 1.5rem;
+    z-index: 100;
+    opacity: 0.45;
+    transition: opacity .2s;
+  }
+  #brand-logo:hover { opacity: 0.85; }
+  #brand-logo img { height: 26px; }
+
+  /* ── Click targets ── */
+  #prev-zone, #next-zone {
+    position: fixed;
+    top: 0; bottom: 0;
+    width: 12%;
+    z-index: 50;
+    cursor: pointer;
+  }
+  #prev-zone { left: 0; }
+  #next-zone { right: 0; }
+</style>
+</head>
+<body>
+
+<div class="deck" id="deck">
+
+  <!-- ── SLIDE 1: Title ─────────────────────────────────────────── -->
+  <div class="slide slide-title active" id="s0">
+    <img src="https://images.squarespace-cdn.com/content/v1/655cf2b8c8ee2227cde11a60/05f282e9-37e2-43c5-940f-5155cac1c3e3/wsl-DF-white.png"
+         alt="Delivered Fresh"
+         style="height:62px; margin-bottom:1.5rem; filter:drop-shadow(0 2px 12px rgba(0,0,0,.7));">
+    <div class="eyebrow">Show &amp; Tell &nbsp;·&nbsp; March 2025</div>
+    <h1>Delivered Fresh<br/><span style="color:#5a9348">Powered by Data</span></h1>
+    <div class="divider"></div>
+    <p class="subtitle">From gut-feel to evidence-based decisions —<br/>how we turned our order data into a live analytics engine</p>
+    <div class="pill-row">
+      <span class="pill green">Order Analytics</span>
+      <span class="pill blue">Customer Segmentation</span>
+      <span class="pill amber">Lifetime Value</span>
+      <span class="pill purple">ML Scoring</span>
+    </div>
+  </div>
+
+  <!-- ── SLIDE 2: What is Delivered Fresh ──────────────────────── -->
+  <div class="slide slide-context" id="s1">
+    <div class="tag">Background</div>
+    <h2>What is Delivered Fresh &amp; how does it work?</h2>
+    <div class="two-col">
+      <div class="card">
+        <h3>🥕 The Business</h3>
+        <ul>
+          <li>Local food hub connecting <strong style="color:#e2e8f0">50+ farms &amp; producers</strong> in Northeast Pennsylvania to homes, businesses and institutions</li>
+          <li>Founded by <strong style="color:#e2e8f0">David &amp; Marla</strong> of WindStone Landing Farms — started in 2013 out of frustration with local farm markets, <strong style="color:#c17f24">purchased by Will &amp; Jen in January 2026</strong></li>
+          <li>Multiple customer tiers: <strong style="color:#5a9348">Retail</strong>, <strong style="color:#3b82f6">Wholesale</strong> and <strong style="color:#c17f24">Producer</strong></li>
+          <li>Orders placed online Thursday &amp; Friday delivery — pastured meats, organic produce, dairy, baked goods &amp; more</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>🔗 Why LFM?</h3>
+        <ul>
+          <li><strong style="color:#e2e8f0">Local Food Marketplace (LFM)</strong> is the platform that runs our storefront, orders, routing and payments</li>
+          <li>Every transaction flows through LFM — making it the single source of truth for our data</li>
+          <li>LFM exposes a full REST API, which means we can pull <em>all</em> our data programmatically</li>
+          <li>Goal: stop relying only on LFM's built-in reports — build our own visibility</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SLIDE 3: The Questions ─────────────────────────────────── -->
+  <div class="slide slide-problem" id="s2">
+    <div class="tag">The Problem</div>
+    <h2>The questions I kept asking<br/><span style="color:#c17f24">and couldn't easily answer</span></h2>
+    <div style="max-width:760px; width:100%; text-align:left; margin-top:.5rem;">
+      <p class="big-q">"What is our real Average Order Value — and is it going up or down over time?"</p>
+      <p class="big-q">"Are we actually winning new customers, or just re-selling to the same people?"</p>
+      <p class="big-q">"We ran a promotion — did it actually move the needle, or would sales have been the same anyway?"</p>
+      <p class="big-q">"When I try something new, how do I know within a few weeks if it's working for real?"</p>
+    </div>
+    <p class="subtitle" style="margin-top:1.2rem; font-size:.9rem;">
+      These aren't hard questions in principle. The data <em>exists</em>. The problem was having no fast, repeatable way to surface the answers.
+    </p>
+  </div>
+
+  <!-- ── SLIDE 4: What We Built ─────────────────────────────────── -->
+  <div class="slide slide-built" id="s3">
+    <div class="tag">The Solution</div>
+    <h2 style="margin-bottom:.8rem">What we built</h2>
+    <p class="subtitle" style="font-size:.9rem;margin-bottom:1.2rem;max-width:780px">
+      A live Python dashboard connected directly to LFM — five views, no spreadsheets, no manual exports.
+    </p>
+
+    <div class="ww-grid">
+
+      <!-- Order Value Analysis -->
+      <div class="ww-card">
+        <div class="ww-preview ww-preview-blue">
+          <svg viewBox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+            <rect x="4"  y="38" width="14" height="18" rx="2" fill="#3b82f6" opacity=".4"/>
+            <rect x="22" y="28" width="14" height="28" rx="2" fill="#3b82f6" opacity=".6"/>
+            <rect x="40" y="18" width="14" height="38" rx="2" fill="#3b82f6" opacity=".8"/>
+            <rect x="58" y="24" width="14" height="32" rx="2" fill="#3b82f6"/>
+            <rect x="76" y="14" width="14" height="42" rx="2" fill="#3b82f6"/>
+            <rect x="94" y="30" width="14" height="26" rx="2" fill="#3b82f6" opacity=".7"/>
+            <polyline points="4,40 22,30 40,20 58,26 76,16 94,32" fill="none" stroke="#93c5fd" stroke-width="2" stroke-linejoin="round"/>
+            <circle cx="76" cy="16" r="3" fill="#93c5fd"/>
+            <text x="4" y="8" font-size="7" fill="#64748b" font-family="sans-serif">AOV &amp; Revenue over time</text>
+          </svg>
+        </div>
+        <div class="ww-label">📊 Order Value Analysis</div>
+        <div class="ww-text">AOV, revenue and order counts by week, month or year. Filter by customer type and spot trends instantly.</div>
+      </div>
+
+      <!-- Customer Segments -->
+      <div class="ww-card">
+        <div class="ww-preview ww-preview-amber">
+          <svg viewBox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+            <!-- donut slices approximated as arcs -->
+            <circle cx="42" cy="32" r="18" fill="none" stroke="#4a7c3f" stroke-width="10"
+                    stroke-dasharray="28 85" stroke-dashoffset="0"/>
+            <circle cx="42" cy="32" r="18" fill="none" stroke="#3b82f6" stroke-width="10"
+                    stroke-dasharray="18 95" stroke-dashoffset="-28"/>
+            <circle cx="42" cy="32" r="18" fill="none" stroke="#ef4444" stroke-width="10"
+                    stroke-dasharray="24 89" stroke-dashoffset="-46"/>
+            <circle cx="42" cy="32" r="18" fill="none" stroke="#f59e0b" stroke-width="10"
+                    stroke-dasharray="15 98" stroke-dashoffset="-70"/>
+            <circle cx="42" cy="32" r="9" fill="#1e1b4b"/>
+            <text x="38" y="35" font-size="6" fill="#94a3b8" font-family="sans-serif">626</text>
+            <!-- legend -->
+            <rect x="72" y="10" width="6" height="6" rx="1" fill="#4a7c3f"/>
+            <text x="81" y="16" font-size="7" fill="#94a3b8" font-family="sans-serif">Champions</text>
+            <rect x="72" y="20" width="6" height="6" rx="1" fill="#3b82f6"/>
+            <text x="81" y="26" font-size="7" fill="#94a3b8" font-family="sans-serif">Loyal</text>
+            <rect x="72" y="30" width="6" height="6" rx="1" fill="#ef4444"/>
+            <text x="81" y="36" font-size="7" fill="#94a3b8" font-family="sans-serif">Lost</text>
+            <rect x="72" y="40" width="6" height="6" rx="1" fill="#f59e0b"/>
+            <text x="81" y="46" font-size="7" fill="#94a3b8" font-family="sans-serif">At-Risk</text>
+          </svg>
+        </div>
+        <div class="ww-label">👥 Customer Segments</div>
+        <div class="ww-text">8 RFM lifecycle buckets: Champions, Loyal, At-Risk, New, Lost and more. Know exactly who needs attention today.</div>
+      </div>
+
+      <!-- Customer LTV -->
+      <div class="ww-card">
+        <div class="ww-preview ww-preview-purple">
+          <svg viewBox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+            <!-- KPI chips -->
+            <rect x="4" y="4" width="34" height="14" rx="3" fill="#312e81" stroke="#6d28d9" stroke-width=".8"/>
+            <text x="21" y="14" text-anchor="middle" font-size="6.5" font-weight="bold" fill="#a78bfa" font-family="sans-serif">$4,200 avg</text>
+            <rect x="42" y="4" width="34" height="14" rx="3" fill="#312e81" stroke="#6d28d9" stroke-width=".8"/>
+            <text x="59" y="14" text-anchor="middle" font-size="6.5" font-weight="bold" fill="#a78bfa" font-family="sans-serif">$1.2M total</text>
+            <!-- bar chart by tier -->
+            <rect x="8"  y="44" width="20" height="12" rx="2" fill="#4a7c3f"/>
+            <text x="18" y="41" text-anchor="middle" font-size="5.5" fill="#94a3b8" font-family="sans-serif">High</text>
+            <rect x="34" y="36" width="20" height="20" rx="2" fill="#3b82f6"/>
+            <text x="44" y="33" text-anchor="middle" font-size="5.5" fill="#94a3b8" font-family="sans-serif">Med</text>
+            <rect x="60" y="28" width="20" height="28" rx="2" fill="#f59e0b" opacity=".7"/>
+            <text x="70" y="25" text-anchor="middle" font-size="5.5" fill="#94a3b8" font-family="sans-serif">Low</text>
+            <text x="4" y="8" font-size="0" fill="none"/><!-- spacer -->
+          </svg>
+        </div>
+        <div class="ww-label">💰 Customer Lifetime Value</div>
+        <div class="ww-text">Projected CLV per customer with 3–36 month windows. High / Medium / Low tiers reveal where the real revenue lives.</div>
+      </div>
+
+      <!-- ML Scoring -->
+      <div class="ww-card">
+        <div class="ww-preview ww-preview-red">
+          <svg viewBox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+            <!-- scatter plot -->
+            <text x="4" y="8" font-size="6" fill="#64748b" font-family="sans-serif">Churn Risk vs Upgrade Potential</text>
+            <!-- axis lines -->
+            <line x1="10" y1="50" x2="116" y2="50" stroke="#334155" stroke-width=".8"/>
+            <line x1="10" y1="10" x2="10"  y2="50" stroke="#334155" stroke-width=".8"/>
+            <!-- quadrant dashes -->
+            <line x1="63" y1="10" x2="63" y2="50" stroke="#334155" stroke-width=".5" stroke-dasharray="2 2"/>
+            <line x1="10" y1="30" x2="116" y2="30" stroke="#334155" stroke-width=".5" stroke-dasharray="2 2"/>
+            <!-- dots: top-right = green (champions-in-waiting) -->
+            <circle cx="80" cy="16" r="3.5" fill="#4a7c3f" opacity=".85"/>
+            <circle cx="95" cy="20" r="2.5" fill="#4a7c3f" opacity=".7"/>
+            <circle cx="88" cy="22" r="2"   fill="#4a7c3f" opacity=".6"/>
+            <!-- top-left = amber (act fast) -->
+            <circle cx="30" cy="14" r="3"   fill="#f59e0b" opacity=".85"/>
+            <circle cx="42" cy="18" r="2"   fill="#f59e0b" opacity=".6"/>
+            <!-- bottom-right = blue -->
+            <circle cx="78" cy="40" r="3"   fill="#3b82f6" opacity=".8"/>
+            <circle cx="92" cy="44" r="2"   fill="#3b82f6" opacity=".6"/>
+            <!-- bottom-left = red (churn) -->
+            <circle cx="20" cy="42" r="3.5" fill="#ef4444" opacity=".85"/>
+            <circle cx="35" cy="38" r="2.5" fill="#ef4444" opacity=".65"/>
+          </svg>
+        </div>
+        <div class="ww-label">🤖 ML Churn &amp; Upgrade Scoring</div>
+        <div class="ww-text">Random Forest models score every customer 0–100 for churn risk and upgrade potential. Top win-back and upsell lists generated automatically.</div>
+      </div>
+
+      <!-- Product Trends -->
+      <div class="ww-card">
+        <div class="ww-preview ww-preview-green">
+          <svg viewBox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+            <text x="4" y="8" font-size="6" fill="#64748b" font-family="sans-serif">Top categories by orders</text>
+            <!-- horizontal bars -->
+            <rect x="32" y="13" width="72" height="7" rx="2" fill="#4a7c3f"/>
+            <text x="28" y="19" text-anchor="end" font-size="6" fill="#94a3b8" font-family="sans-serif">Veg</text>
+            <rect x="32" y="23" width="58" height="7" rx="2" fill="#4a7c3f" opacity=".8"/>
+            <text x="28" y="29" text-anchor="end" font-size="6" fill="#94a3b8" font-family="sans-serif">Meat</text>
+            <rect x="32" y="33" width="44" height="7" rx="2" fill="#4a7c3f" opacity=".6"/>
+            <text x="28" y="39" text-anchor="end" font-size="6" fill="#94a3b8" font-family="sans-serif">Dairy</text>
+            <rect x="32" y="43" width="30" height="7" rx="2" fill="#4a7c3f" opacity=".4"/>
+            <text x="28" y="49" text-anchor="end" font-size="6" fill="#94a3b8" font-family="sans-serif">Bakery</text>
+          </svg>
+        </div>
+        <div class="ww-label">📈 Product &amp; Producer Trends</div>
+        <div class="ww-text">Top categories and producers by order volume over time. Understand what's driving — and dragging — the basket.</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── SLIDE 5: How it answers the questions ──────────────────── -->
+  <div class="slide slide-answers" id="s4">
+    <div class="tag">Connecting the dots</div>
+    <h2>How the dashboard answers<br/>those exact questions</h2>
+    <div class="two-col" style="max-width:860px;">
+      <div class="card">
+        <h3 style="color:#5a9348">✅ AOV &amp; trends</h3>
+        <p><em>Order Value Analysis</em> view — AOV by week/month/year, by customer type. See a dip the same week you ran a discount? Now you can prove it.</p>
+      </div>
+      <div class="card">
+        <h3 style="color:#3b82f6">✅ New customer acquisition</h3>
+        <p><em>Customer Segments</em> view — the "New" segment shows first-time buyers in the last 90 days. Track the number across periods to see if growth is real.</p>
+      </div>
+      <div class="card">
+        <h3 style="color:#c17f24">✅ Did the promo work?</h3>
+        <p><em>Order Value Analysis</em> — filter to the promo week/month, compare AOV and order count to the same week prior year or prior period. Evidence, not intuition.</p>
+      </div>
+      <div class="card">
+        <h3 style="color:#ef4444">✅ Is this new thing working?</h3>
+        <p><em>Customer LTV + ML scoring</em> — run scoring before and after. Are churn-risk scores improving? Is upgrader pool growing? Measurable signals in weeks, not quarters.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SLIDE 6: Live Demo ─────────────────────────────────────── -->
+  <div class="slide slide-demo" id="s5">
+    <p style="font-size:5rem; margin-bottom:1rem;">🖥️</p>
+    <div class="tag">Up next</div>
+    <h1 style="font-size:clamp(2rem,4vw,3.2rem)">Live Demo</h1>
+    <div class="divider"></div>
+    <p class="subtitle" style="max-width:560px;">
+      We'll walk through the dashboard live — loading customer data, exploring segments, running ML scoring, and checking lifetime value.
+    </p>
+    <div class="pill-row" style="margin-top:1.5rem;">
+      <span class="pill blue">Fetch Customers</span>
+      <span class="pill amber">Customer Segments</span>
+      <span class="pill green">Customer LTV</span>
+      <span class="pill purple">ML Scoring</span>
+    </div>
+  </div>
+
+  <!-- ── SLIDE 7: Q&A ───────────────────────────────────────────── -->
+  <div class="slide slide-qa" id="s6">
+    <p style="font-size:5rem; margin-bottom:1rem;">💬</p>
+    <h1 style="font-size:clamp(2rem,4vw,3.2rem)">Questions?</h1>
+    <div class="divider"></div>
+    <p class="subtitle">Thanks for watching — happy to dig into any part of the analysis, the data model, or what we're planning to build next.</p>
+    <p style="margin-top:2.5rem; font-size:.8rem; color:#334155;">
+      Built with Python · Streamlit · Plotly · scikit-learn · Local Food Marketplace API
+    </p>
+    <p style="margin-top:1.2rem; font-size:.78rem; color:#3d6b35; letter-spacing:.05em;">
+      deliveredfresh.store &nbsp;·&nbsp; (570) 596-4470 &nbsp;·&nbsp; Jen@deliveredfresh.store
+    </p>
+  </div>
+
+</div><!-- /deck -->
+
+<!-- Brand watermark (visible on all slides) -->
+<div id="brand-logo">
+  <img src="https://images.squarespace-cdn.com/content/v1/655cf2b8c8ee2227cde11a60/05f282e9-37e2-43c5-940f-5155cac1c3e3/wsl-DF-white.png"
+       alt="Delivered Fresh">
+</div>
+
+<!-- Navigation overlays -->
+<div id="prev-zone"></div>
+<div id="next-zone"></div>
+
+<!-- Progress -->
+<div id="progress"></div>
+<div id="counter"></div>
+<div id="nav-hint">← → arrow keys to navigate &nbsp; · &nbsp; or click left/right edges</div>
+
+<script>
+  const slides  = Array.from(document.querySelectorAll('.slide'));
+  const total   = slides.length;
+  let current   = 0;
+  let hintTimer = null;
+
+  const bar     = document.getElementById('progress');
+  const counter = document.getElementById('counter');
+  const hint    = document.getElementById('nav-hint');
+
+  function showSlide(n) {
+    slides[current].classList.remove('active');
+    slides[current].classList.add('out');
+    setTimeout(() => slides[current < n ? current : n + 1]?.classList.remove('out'), 400);
+    current = Math.max(0, Math.min(n, total - 1));
+    slides.forEach((s, i) => {
+      s.classList.remove('active', 'out');
+      if (i === current) s.classList.add('active');
+    });
+    bar.style.width = ((current + 1) / total * 100) + '%';
+    counter.textContent = (current + 1) + ' / ' + total;
+  }
+
+  function next() { if (current < total - 1) showSlide(current + 1); }
+  function prev() { if (current > 0)         showSlide(current - 1); }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); next(); }
+    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')  { e.preventDefault(); prev(); }
+  });
+
+  document.getElementById('next-zone').addEventListener('click', next);
+  document.getElementById('prev-zone').addEventListener('click', prev);
+
+  // Hide nav hint after 4s
+  hintTimer = setTimeout(() => { hint.style.opacity = '0'; }, 4000);
+
+  // Initial state
+  showSlide(0);
+</script>
+</body>
+</html>
