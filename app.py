@@ -24,7 +24,7 @@ load_dotenv()
 
 import streamlit as st
 
-from app.auth.auth_helpers import get_current_user
+from app.auth.auth_helpers import get_current_user, get_login_url
 from app.db.models import Base, Customer
 from app.db.session import get_engine, get_session
 from app.services.customer_service import (
@@ -143,60 +143,20 @@ def main():
 
     # ── Not authenticated ────────────────────────────────────────────────
     if user_name is None:
-        hostname = os.environ.get("WEBSITE_HOSTNAME", "")
-        if hostname:
-            # Show debug info so we can diagnose why auth is not resolving
-            st.title("🔒 Authentication Debug")
-            st.markdown("Auth identity could not be resolved. Debug info below:")
-
-            # Show headers (redacted values)
-            headers = dict(getattr(st.context, "headers", {}))
-            auth_headers = {k: v for k, v in headers.items()
-                           if k.lower().startswith("x-ms-")}
-            st.subheader("Easy Auth Headers")
-            if auth_headers:
-                st.json(auth_headers)
-            else:
-                st.warning("No X-Ms-* headers found in WebSocket connection.")
-
-            # Show cookies
-            cookies = dict(getattr(st.context, "cookies", {}))
-            cookie_names = list(cookies.keys())
-            st.subheader("Cookies")
-            st.write(f"Cookie names present: {cookie_names}")
-            has_auth_cookie = "AppServiceAuthSession" in cookies
-            st.write(f"AppServiceAuthSession present: {has_auth_cookie}")
-
-            # Try /.auth/me manually and show result
-            st.subheader("/.auth/me call result")
-            try:
-                import urllib.request, json, ssl
-                auth_cookie = cookies.get("AppServiceAuthSession", "")
-                if auth_cookie:
-                    url = f"https://{hostname}/.auth/me"
-                    req = urllib.request.Request(url)
-                    req.add_header("Cookie", f"AppServiceAuthSession={auth_cookie}")
-                    ctx = ssl.create_default_context()
-                    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-                        data = json.loads(resp.read())
-                        st.json(data)
-                else:
-                    st.info("No auth cookie — user has not signed in yet.")
-            except Exception as exc:
-                st.error(f"/.auth/me call failed: {type(exc).__name__}: {exc}")
-
-            # Provide sign-in link (not auto-redirect to avoid loops)
-            login_url = f"https://{hostname}/.auth/login/aad?post_login_redirect_uri=/"
-            st.markdown(f"[Click here to sign in]({login_url})")
-        else:
-            st.title("🔒 Authentication Required")
-            if os.environ.get("APP_ENV") == "development":
-                st.warning(
-                    "**Local dev mode:** Set `DEV_USER_OBJECT_ID`, `DEV_USER_EMAIL`, "
-                    "and `DEV_USER_NAME` in your `.env` file to simulate a signed-in user."
-                )
-            else:
-                st.info("Please sign in with your Microsoft account.")
+        st.title("🔒 Sign In Required")
+        login_url = get_login_url()
+        st.markdown(
+            f'<a href="{login_url}" target="_self" style="display:inline-block;'
+            f'padding:0.6rem 1.2rem;background:#0078d4;color:white;'
+            f'border-radius:6px;text-decoration:none;font-weight:600;">'
+            f'Sign in with Microsoft</a>',
+            unsafe_allow_html=True,
+        )
+        if os.environ.get("APP_ENV") == "development":
+            st.warning(
+                "**Local dev mode:** Set `DEV_USER_OBJECT_ID`, `DEV_USER_EMAIL`, "
+                "and `DEV_USER_NAME` in your `.env` file to simulate a signed-in user."
+            )
         st.stop()
 
     # ── No customer mapping ──────────────────────────────────────────────
