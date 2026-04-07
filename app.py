@@ -143,17 +143,27 @@ def main():
 
     # ── Not authenticated ────────────────────────────────────────────────
     if user_name is None:
-        st.title("🔒 Authentication Required")
-        st.info(
-            "Please sign in with your Microsoft account. "
-            "If you are seeing this on Azure, ensure App Service Authentication "
-            "is enabled and configured."
-        )
-        if os.environ.get("APP_ENV") == "development":
-            st.warning(
-                "**Local dev mode:** Set `DEV_USER_OBJECT_ID`, `DEV_USER_EMAIL`, "
-                "and `DEV_USER_NAME` in your `.env` file to simulate a signed-in user."
+        # On Azure, redirect straight to the Easy Auth login endpoint
+        hostname = os.environ.get("WEBSITE_HOSTNAME", "")
+        if hostname:
+            login_url = f"https://{hostname}/.auth/login/aad?post_login_redirect_uri=/"
+            st.markdown(
+                f'<meta http-equiv="refresh" content="0;url={login_url}">',
+                unsafe_allow_html=True,
             )
+            st.title("🔒 Redirecting to sign-in…")
+            st.markdown(
+                f"If you are not redirected automatically, [click here]({login_url})."
+            )
+        else:
+            st.title("🔒 Authentication Required")
+            if os.environ.get("APP_ENV") == "development":
+                st.warning(
+                    "**Local dev mode:** Set `DEV_USER_OBJECT_ID`, `DEV_USER_EMAIL`, "
+                    "and `DEV_USER_NAME` in your `.env` file to simulate a signed-in user."
+                )
+            else:
+                st.info("Please sign in with your Microsoft account.")
         st.stop()
 
     # ── No customer mapping ──────────────────────────────────────────────
