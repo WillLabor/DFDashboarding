@@ -79,6 +79,19 @@ def save_api_key_reference(session, customer: Customer, secret_name: str) -> Non
     session.flush()
 
 
+def create_customer_with_admin(session, org_name: str, user: User) -> Customer:
+    """Create a new customer (organization) and set the user as its admin."""
+    customer = Customer(name=org_name.strip())
+    session.add(customer)
+    session.flush()
+
+    user.customer_id = customer.id
+    user.role = "admin"
+    user.updated_at = datetime.now(UTC)
+    session.flush()
+    return customer
+
+
 def get_team_members(session, customer_id: int) -> list[User]:
     """Return all users linked to a customer."""
     return session.query(User).filter_by(customer_id=customer_id).all()

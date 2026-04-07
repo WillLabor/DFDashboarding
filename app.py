@@ -31,6 +31,7 @@ from app.services.customer_service import (
     get_or_create_user,
     get_customer_for_user,
     save_api_key_reference,
+    create_customer_with_admin,
     get_team_members,
     get_pending_invites,
     create_invite,
@@ -328,14 +329,49 @@ def main():
 
     # ── No customer mapping ──────────────────────────────────────────────
     if customer_id is None:
-        st.title("⏳ Account Pending")
-        st.warning(
-            f"Your account (**{user_email}**) is not yet linked to a team.\n\n"
-            "Your administrator needs to invite you from their **Team Management** page. "
-            "Once they add your email, simply refresh this page and you'll be connected automatically."
-        )
-        # Let them sign out and try a different account
-        if st.button("Sign out"):
+        st.title("👋 Welcome")
+        st.markdown(f"Signed in as **{user_email}**")
+
+        tab_new, tab_wait = st.tabs(["Create New Organization", "Waiting for an Invite?"])
+
+        with tab_new:
+            st.markdown(
+                "If you're the **first person** from your company, create your "
+                "organization here. You'll become the admin and can invite "
+                "your team members later."
+            )
+            org_name = st.text_input(
+                "Organization name",
+                placeholder="e.g. Sunshine Farm Co-op",
+                key="new_org_name",
+            )
+            if st.button("Create Organization", type="primary", key="btn_create_org"):
+                if not org_name or not org_name.strip():
+                    st.error("Please enter an organization name.")
+                else:
+                    with get_session() as session:
+                        from app.db.models import User as UserModel
+                        u = session.query(UserModel).filter_by(
+                            entra_object_id=st.session_state["_auth_user"]["object_id"]
+                        ).first()
+                        create_customer_with_admin(session, org_name, u)
+                    _clear_auth_cache()
+                    st.success(f"**{org_name.strip()}** created! Redirecting…")
+                    st.rerun()
+
+        with tab_wait:
+            st.info(
+                "If your administrator has already set up your organization, "
+                "ask them to add your email from their **Team Management** page.\n\n"
+                "Once they invite you, simply **refresh this page** and you'll "
+                "be connected automatically."
+            )
+            if st.button("🔄 Refresh", key="btn_refresh_pending"):
+                _clear_auth_cache()
+                st.rerun()
+
+        st.markdown("---")
+        if st.button("Sign out", key="btn_signout_pending"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
