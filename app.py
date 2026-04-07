@@ -37,6 +37,32 @@ from app.services.lfm_client import validate_api_key
 # Auto-create tables on startup (idempotent)
 Base.metadata.create_all(get_engine())
 
+# ── Seed pilot customer (idempotent, runs once) ──────────────────────────────
+def _seed_pilot():
+    with get_session() as session:
+        cust = session.query(Customer).filter_by(name="Delivered Fresh").first()
+        if not cust:
+            cust = Customer(name="Delivered Fresh")
+            session.add(cust)
+            session.flush()
+        # Ensure pilot user is linked
+        from app.db.models import User
+        u = session.query(User).filter_by(
+            entra_object_id="7e3c6606-aaa6-4c7f-9c5a-f916216f014c"
+        ).first()
+        if u and u.customer_id != cust.id:
+            u.customer_id = cust.id
+        elif not u:
+            session.add(User(
+                entra_object_id="7e3c6606-aaa6-4c7f-9c5a-f916216f014c",
+                email="william.labor.jr@outlook.com",
+                display_name="William Labor",
+                customer_id=cust.id,
+                role="admin",
+            ))
+
+_seed_pilot()
+
 
 # ── Auth resolution (cached in session_state) ────────────────────────────────
 
