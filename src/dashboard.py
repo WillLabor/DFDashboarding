@@ -15,7 +15,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import warnings
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -670,23 +669,16 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             lambda x: round(x, 1) if x is not None and not (isinstance(x, float) and pd.isna(x)) else None
         )
 
-        gb = GridOptionsBuilder.from_dataframe(grid_df)
-        gb.configure_default_column(resizable=True, sortable=True, filter=True, min_column_width=100)
-        gb.configure_column("Revenue", type=["numericColumn"], valueFormatter="'$' + value.toLocaleString('en-US', {minimumFractionDigits:2})")
-        gb.configure_column("AOV", type=["numericColumn"], valueFormatter="'$' + value.toFixed(2)")
-        gb.configure_column("% Orders >$100", type=["numericColumn"], valueFormatter="value + '%'")
-        gb.configure_column("Recurring % *", type=["numericColumn"], valueFormatter="value + '%'")
-        gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
-        gb.configure_grid_options(domLayout='autoHeight')
-        grid_options = gb.build()
-
-        AgGrid(
+        st.dataframe(
             grid_df,
-            gridOptions=grid_options,
-            update_mode=GridUpdateMode.NO_UPDATE,
-            height=400,
             use_container_width=True,
-            allow_unsafe_jscode=True,
+            height=400,
+            column_config={
+                "Revenue": st.column_config.NumberColumn(format="$%.2f"),
+                "AOV": st.column_config.NumberColumn(format="$%.2f"),
+                "% Orders >$100": st.column_config.NumberColumn(format="%.1f%%"),
+                "Recurring % *": st.column_config.NumberColumn(format="%.1f%%"),
+            },
         )
 
         # --- Plotly trend chart ---
@@ -720,16 +712,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         if new_customer_rows:
             st.markdown('<p class="section-header">New Customers (First Order in Selected Periods)</p>', unsafe_allow_html=True)
             new_cust_df = pd.DataFrame(new_customer_rows).sort_values(["First Period", "Customer Type"])
-            gb2 = GridOptionsBuilder.from_dataframe(new_cust_df)
-            gb2.configure_default_column(resizable=True, sortable=True, filter=True)
-            gb2.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
-            AgGrid(
-                new_cust_df,
-                gridOptions=gb2.build(),
-                update_mode=GridUpdateMode.NO_UPDATE,
-                height=300,
-                use_container_width=True,
-            )
+            st.dataframe(new_cust_df, use_container_width=True, height=300)
 
         # --- Plotly comparison tabs ---
         if len(metrics_df["Period Start"].unique()) > 1:
@@ -886,18 +869,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         })
         profile = profile.sort_values("# Customers", ascending=False)
 
-        gb_p = GridOptionsBuilder.from_dataframe(profile)
-        gb_p.configure_default_column(resizable=True, sortable=True, filter=True, wrapText=True, autoHeight=True)
-        gb_p.configure_column("Suggested Action", minWidth=340)
-        gb_p.configure_column("Segment", minWidth=140)
-        gb_p.configure_pagination(paginationAutoPageSize=False, paginationPageSize=10)
-        AgGrid(
-            profile,
-            gridOptions=gb_p.build(),
-            update_mode=GridUpdateMode.NO_UPDATE,
-            height=340,
-            use_container_width=True,
-        )
+        st.dataframe(profile, use_container_width=True, height=340)
 
         # ── Customer drill-down by segment ────────────────────────────────────
         st.markdown('<p class="section-header">Customer List by Segment</p>', unsafe_allow_html=True)
@@ -928,16 +900,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         cust_display = cust_display.sort_values("totalSales", ascending=False) if "totalSales" in cust_display.columns else cust_display
 
         st.caption(f"{len(cust_display)} customers in **{selected_seg}** segment")
-        gb_c = GridOptionsBuilder.from_dataframe(cust_display)
-        gb_c.configure_default_column(resizable=True, sortable=True, filter=True)
-        gb_c.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
-        AgGrid(
-            cust_display,
-            gridOptions=gb_c.build(),
-            update_mode=GridUpdateMode.NO_UPDATE,
-            height=420,
-            use_container_width=True,
-        )
+        st.dataframe(cust_display, use_container_width=True, height=420)
 
         # ── Order data enrichment (if orders are loaded) ─────────────────────
         if df is not None and "email" in seg_df.columns and "email" in df.columns:
@@ -1034,10 +997,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                 if not candidates.empty:
                     cand_cols = [c for c in ["fullName","email","custType","totalOrders","totalSales","days_since_last_order"] if c in candidates.columns]
                     cand_display = candidates[cand_cols].sort_values("totalSales", ascending=False) if "totalSales" in cand_cols else candidates[cand_cols]
-                    gb_cand = GridOptionsBuilder.from_dataframe(cand_display)
-                    gb_cand.configure_default_column(resizable=True, sortable=True, filter=True)
-                    gb_cand.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
-                    AgGrid(cand_display, gridOptions=gb_cand.build(), update_mode=GridUpdateMode.NO_UPDATE, height=300, use_container_width=True)
+                    st.dataframe(cand_display, use_container_width=True, height=300)
                 else:
                     st.info("No candidates found for this segment.")
 
@@ -1103,14 +1063,8 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                                         "churn_risk_score", "upgrade_potential_score",
                                         "totalOrders", "totalSales", "days_since_last_order"] if c in winback.columns]
                 winback_display = winback[wb_cols].round(1)
-                gb_wb = GridOptionsBuilder.from_dataframe(winback_display)
-                gb_wb.configure_default_column(resizable=True, sortable=True, filter=True)
-                gb_wb.configure_column("churn_risk_score", header_name="Churn Risk (0-100)")
-                if "upgrade_potential_score" in wb_cols:
-                    gb_wb.configure_column("upgrade_potential_score", header_name="Upgrade Potential (0-100)")
-                gb_wb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=10)
-                AgGrid(winback_display, gridOptions=gb_wb.build(),
-                       update_mode=GridUpdateMode.NO_UPDATE, height=340, use_container_width=True)
+                winback_display.columns = [c.replace("churn_risk_score", "Churn Risk (0-100)").replace("upgrade_potential_score", "Upgrade Potential (0-100)") for c in winback_display.columns]
+                st.dataframe(winback_display, use_container_width=True, height=340)
 
                 # ── Top upsell / upgrade candidates
                 if "upgrade_potential_score" in scored_df.columns:
@@ -1125,14 +1079,8 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                                             "upgrade_potential_score", "churn_risk_score",
                                             "totalOrders", "totalSales", "days_since_last_order"] if c in upsell.columns]
                     upsell_display = upsell[us_cols].round(1)
-                    gb_us = GridOptionsBuilder.from_dataframe(upsell_display)
-                    gb_us.configure_default_column(resizable=True, sortable=True, filter=True)
-                    gb_us.configure_column("upgrade_potential_score", header_name="Upgrade Potential (0-100)")
-                    if "churn_risk_score" in us_cols:
-                        gb_us.configure_column("churn_risk_score", header_name="Churn Risk (0-100)")
-                    gb_us.configure_pagination(paginationAutoPageSize=False, paginationPageSize=10)
-                    AgGrid(upsell_display, gridOptions=gb_us.build(),
-                           update_mode=GridUpdateMode.NO_UPDATE, height=340, use_container_width=True)
+                    upsell_display.columns = [c.replace("upgrade_potential_score", "Upgrade Potential (0-100)").replace("churn_risk_score", "Churn Risk (0-100)") for c in upsell_display.columns]
+                    st.dataframe(upsell_display, use_container_width=True, height=340)
 
                 # ── Score distribution scatter
                 st.markdown('<p class="section-header">Score Distribution by Segment</p>', unsafe_allow_html=True)
@@ -1260,16 +1208,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         ).reset_index().round(2)
         producer_summary = producer_summary.sort_values("total_units", ascending=False)
 
-        gb_prod = GridOptionsBuilder.from_dataframe(producer_summary)
-        gb_prod.configure_default_column(resizable=True, sortable=True, filter=True)
-        gb_prod.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
-        AgGrid(
-            producer_summary,
-            gridOptions=gb_prod.build(),
-            update_mode=GridUpdateMode.NO_UPDATE,
-            height=300,
-            use_container_width=True,
-        )
+        st.dataframe(producer_summary, use_container_width=True, height=300)
 
         # --- Product-level trends ---
         st.markdown('<p class="section-header">Top Products by Producer</p>', unsafe_allow_html=True)
@@ -1441,15 +1380,14 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             .reset_index()
             .sort_values("Total_Projected_CLV", ascending=False)
         )
-        gb_ss = GridOptionsBuilder.from_dataframe(seg_summary)
-        gb_ss.configure_default_column(resizable=True, sortable=True, filter=True)
-        gb_ss.configure_column("Avg_Historical_CLV",    header_name="Avg Historical CLV ($)")
-        gb_ss.configure_column("Avg_Projected_CLV",     header_name=f"Avg Projected CLV {proj_months}m ($)")
-        gb_ss.configure_column("Total_Projected_CLV",   header_name=f"Total Projected CLV {proj_months}m ($)")
-        gb_ss.configure_column("Avg_AOV",               header_name="Avg Order Value ($)")
-        gb_ss.configure_column("Avg_Orders_Per_Month",  header_name="Avg Orders / Month")
-        AgGrid(seg_summary, gridOptions=gb_ss.build(),
-               update_mode=GridUpdateMode.NO_UPDATE, height=280, use_container_width=True)
+        seg_summary = seg_summary.rename(columns={
+            "Avg_Historical_CLV": "Avg Historical CLV ($)",
+            "Avg_Projected_CLV": f"Avg Projected CLV {proj_months}m ($)",
+            "Total_Projected_CLV": f"Total Projected CLV {proj_months}m ($)",
+            "Avg_AOV": "Avg Order Value ($)",
+            "Avg_Orders_Per_Month": "Avg Orders / Month",
+        })
+        st.dataframe(seg_summary, use_container_width=True, height=280)
 
         # ── Full customer CLV table ────────────────────────────────────────────
         st.markdown('<p class="section-header">All Customers — CLV Breakdown</p>', unsafe_allow_html=True)
@@ -1459,17 +1397,15 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             "orders_per_month", "totalOrders", "days_since_last_order",
         ] if c in clv_df.columns]
         clv_display = clv_df[clv_cols].sort_values("projected_clv", ascending=False).round(2)
-        gb_clv = GridOptionsBuilder.from_dataframe(clv_display)
-        gb_clv.configure_default_column(resizable=True, sortable=True, filter=True)
-        gb_clv.configure_column("historical_clv",   header_name="Historical CLV ($)")
-        gb_clv.configure_column("projected_clv",    header_name=f"Projected CLV {proj_months}m ($)")
-        gb_clv.configure_column("avg_order_value",  header_name="Avg Order Value ($)")
-        gb_clv.configure_column("orders_per_month", header_name="Orders / Month")
-        gb_clv.configure_column("days_since_last_order", header_name="Days Since Last Order")
-        gb_clv.configure_column("clv_tier",         header_name="CLV Tier")
-        gb_clv.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
-        AgGrid(clv_display, gridOptions=gb_clv.build(),
-               update_mode=GridUpdateMode.NO_UPDATE, height=480, use_container_width=True)
+        clv_display = clv_display.rename(columns={
+            "historical_clv": "Historical CLV ($)",
+            "projected_clv": f"Projected CLV {proj_months}m ($)",
+            "avg_order_value": "Avg Order Value ($)",
+            "orders_per_month": "Orders / Month",
+            "days_since_last_order": "Days Since Last Order",
+            "clv_tier": "CLV Tier",
+        })
+        st.dataframe(clv_display, use_container_width=True, height=480)
 
     elif view == "Product Availability":
         dark = st.sidebar.checkbox("Dark mode", value=False, key="dark_avail")
@@ -1571,11 +1507,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             .sort_values("quantitySold" if "quantitySold" in agg_dict else producer_col, ascending=False)
             .round(1)
         )
-        gb_avail = GridOptionsBuilder.from_dataframe(avail_summary)
-        gb_avail.configure_default_column(resizable=True, sortable=True, filter=True)
-        gb_avail.configure_pagination(paginationAutoPageSize=False, paginationPageSize=15)
-        AgGrid(avail_summary, gridOptions=gb_avail.build(),
-               update_mode=GridUpdateMode.NO_UPDATE, height=300, use_container_width=True)
+        st.dataframe(avail_summary, use_container_width=True, height=300)
 
         # --- Product drill-down ---
         st.markdown('<p class="section-header">Product Detail by Producer</p>', unsafe_allow_html=True)
@@ -1593,11 +1525,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                     .sort_values(list(detail_agg.keys())[0], ascending=False)
                     .round(1)
                 )
-                gb_prod_detail = GridOptionsBuilder.from_dataframe(prod_table)
-                gb_prod_detail.configure_default_column(resizable=True, sortable=True, filter=True)
-                gb_prod_detail.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
-                AgGrid(prod_table, gridOptions=gb_prod_detail.build(),
-                       update_mode=GridUpdateMode.NO_UPDATE, height=350, use_container_width=True)
+                st.dataframe(prod_table, use_container_width=True, height=350)
 
 
 if __name__ == "__main__":

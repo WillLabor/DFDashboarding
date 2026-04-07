@@ -3,7 +3,6 @@ pandas>=2.0
 requests>=2.30
 streamlit>=1.37
 plotly>=5.0
-streamlit-aggrid>=1.0
 
 # ML
 scikit-learn>=1.3
