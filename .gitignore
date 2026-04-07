@@ -7,6 +7,10 @@ __pycache__/
 *.venv
 .venv/
 
+# Local dev data
+local.db
+.dev_secrets.json
+
 # Jupyter
 .ipynb_checkpoints
 

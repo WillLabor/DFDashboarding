@@ -6,6 +6,7 @@ structure where only one row per order contains the order-level totals.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -30,7 +31,7 @@ from src.ml_experiments import run_customer_ml
 
 DEFAULT_BASE_URL = "https://data.localfoodmarketplace.com"
 DEFAULT_ENDPOINT = "/api/Orders"
-DEFAULT_API_KEY = "158d2724-fa51-4f7d-be0e-682e4e2860dc"
+DEFAULT_API_KEY = os.environ.get("LFM_API_KEY", "")
 DEFAULT_LAST_DAYS = 730
 
 SEGMENT_COLORS = {
@@ -99,8 +100,11 @@ def fetch_orders_from_api(
     )
 
 
-def main() -> None:
-    st.set_page_config(page_title="Delivered Fresh · Analytics", layout="wide", page_icon="🌿")
+def main(api_key: str | None = None, user_display_name: str | None = None) -> None:
+    managed_mode = api_key is not None
+
+    if not managed_mode:
+        st.set_page_config(page_title="Delivered Fresh · Analytics", layout="wide", page_icon="🌿")
 
     # --- Modern CSS ---
     st.markdown("""
@@ -194,6 +198,10 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    if managed_mode and user_display_name:
+        st.sidebar.markdown(f"👤 **{user_display_name}**")
+        st.sidebar.markdown("---")
+
     source = st.sidebar.radio("Data source", ["API", "CSV upload"], index=0)
 
     # Initialize session state for data persistence
@@ -215,15 +223,19 @@ def main() -> None:
     ml_results = st.session_state.ml_results
 
     if source == "API":
-        st.sidebar.header("API settings")
-        base_url = st.sidebar.text_input("Base URL", DEFAULT_BASE_URL, disabled=True)
-        endpoint = st.sidebar.text_input("Endpoint", DEFAULT_ENDPOINT, disabled=True)
-        api_key = st.sidebar.text_input(
-            "API key",
-            DEFAULT_API_KEY,
-            type="password",
-            disabled=True,
-        )
+        if not managed_mode:
+            st.sidebar.header("API settings")
+            base_url = st.sidebar.text_input("Base URL", DEFAULT_BASE_URL, disabled=True)
+            endpoint = st.sidebar.text_input("Endpoint", DEFAULT_ENDPOINT, disabled=True)
+            api_key = st.sidebar.text_input(
+                "API key",
+                DEFAULT_API_KEY,
+                type="password",
+                disabled=True,
+            )
+        else:
+            base_url = DEFAULT_BASE_URL
+            endpoint = DEFAULT_ENDPOINT
 
         st.sidebar.markdown("---")
         st.sidebar.header("Date filter")
@@ -1589,4 +1601,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
     main()
