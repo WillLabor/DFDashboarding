@@ -28,7 +28,7 @@ from src.data_loader import fetch_api_to_df, fetch_price_levels, fetch_availabil
 from src.order_analysis import average_order_value_by_type_period, calculate_clv
 from src.ml_experiments import run_customer_ml
 
-DEFAULT_BASE_URL = "https://data-dev.localfoodmarketplace.com"
+DEFAULT_BASE_URL = "https://data.localfoodmarketplace.com"
 DEFAULT_ENDPOINT = "/api/Orders"
 DEFAULT_API_KEY = "158d2724-fa51-4f7d-be0e-682e4e2860dc"
 DEFAULT_LAST_DAYS = 730
@@ -107,7 +107,7 @@ def main() -> None:
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    .block-container { padding-top: 1rem; padding-bottom: 2rem; }
+    .block-container { padding-top: 2.5rem; padding-bottom: 2rem; }
     [data-testid="stMetric"] {
         background: linear-gradient(135deg, #f6faf4 0%, #eef6eb 100%);
         border: 1px solid #c3ddb8;
@@ -129,9 +129,16 @@ def main() -> None:
         font-weight: 600 !important;
     }
     [data-testid="stSidebar"] .stButton > button:hover { background: #3a6231 !important; }
-    [data-testid="stSidebar"] input, [data-testid="stSidebar"] select {
+    [data-testid="stSidebar"] input, [data-testid="stSidebar"] select,
+    [data-testid="stSidebar"] textarea,
+    [data-testid="stSidebar"] [data-baseweb="input"] input,
+    [data-testid="stSidebar"] [data-baseweb="select"] span,
+    [data-testid="stSidebar"] [data-baseweb="select"] div,
+    [data-testid="stSidebar"] .stNumberInput input,
+    [data-testid="stSidebar"] .stTextInput input {
         background: #243d1c !important; color: #ffffff !important;
         border-color: #4a7c3f !important;
+        -webkit-text-fill-color: #ffffff !important;
     }
     div[data-baseweb="select"] { border-color: #4a7c3f !important; }
     .stTabs [data-baseweb="tab-list"] { border-bottom-color: #c3ddb8; }

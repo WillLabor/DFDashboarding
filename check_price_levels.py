@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.data_loader import fetch_price_levels, fetch_availability_to_df
 
-BASE_URL = "https://data-dev.localfoodmarketplace.com"
+BASE_URL = "https://data.localfoodmarketplace.com"
 API_KEY  = "158d2724-fa51-4f7d-be0e-682e4e2860dc"   # same key as dashboard
 
 # ── Step 1: fetch price levels ────────────────────────────────────────────────

@@ -37,14 +37,14 @@ A starter Python workspace for:
 1. Fetch API data and save to CSV (example using Local Food Marketplace API):
    ```bash
    python src/run_fetch.py \
-     --base-url https://data-dev.localfoodmarketplace.com \
+     --base-url https://data.localfoodmarketplace.com \
      --url /api/Orders \
      --api-key 158d2724-fa51-4f7d-be0e-682e4e2860dc \
      --last-days 90 \
      --output data/orders_last_90_days.csv
    ```
 
-   - Use the Swagger docs to find available endpoints: https://data-dev.localfoodmarketplace.com/swagger/index.html
+   - Use the Swagger docs to find available endpoints: https://data.localfoodmarketplace.com/swagger/index.html
    - For date filters, you can also pass `--start-date` and `--end-date` in ISO format.
 
 2. Open the dashboard to explore the exported CSV:

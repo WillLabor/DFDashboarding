@@ -2,7 +2,7 @@
 
 Example:
     python src/run_fetch.py \
-      --base-url https://data-dev.localfoodmarketplace.com \
+      --base-url https://data.localfoodmarketplace.com \
       --url /api/products \
       --api-key 158d2724-fa51-4f7d-be0e-682e4e2860dc \
       --output data/output.csv
