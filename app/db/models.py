@@ -51,3 +51,5 @@ class PendingInvite(Base):
     role = Column(String(50), nullable=False, default="viewer")
     invited_by = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+
+    customer = relationship("Customer", back_populates="pending_invites")
