@@ -23,6 +23,7 @@ class Customer(Base):
                         onupdate=lambda: datetime.now(UTC))
 
     users = relationship("User", back_populates="customer")
+    pending_invites = relationship("PendingInvite", back_populates="customer")
 
 
 class User(Base):
@@ -33,9 +34,20 @@ class User(Base):
     email = Column(String(255), nullable=False)
     display_name = Column(String(255), nullable=True)
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
-    role = Column(String(50), nullable=False, default="admin")
+    role = Column(String(50), nullable=False, default="viewer")
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC),
                         onupdate=lambda: datetime.now(UTC))
 
     customer = relationship("Customer", back_populates="users")
+
+
+class PendingInvite(Base):
+    __tablename__ = "pending_invites"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(255), nullable=False)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
+    role = Column(String(50), nullable=False, default="viewer")
+    invited_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
