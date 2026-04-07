@@ -31,7 +31,6 @@ from app.services.customer_service import (
     get_or_create_user,
     get_customer_for_user,
     save_api_key_reference,
-    create_customer_with_admin,
     get_team_members,
     get_pending_invites,
     create_invite,
@@ -40,6 +39,11 @@ from app.services.customer_service import (
     remove_user_from_customer,
 )
 from app.services.lfm_client import validate_api_key
+
+# ── Global admin — platform owner(s) who can create orgs ─────────────────────
+GLOBAL_ADMIN_IDS = {
+    "7e3c6606-aaa6-4c7f-9c5a-f916216f014c",  # William Labor
+}
 
 # Auto-create tables on startup (idempotent)
 Base.metadata.create_all(get_engine())
@@ -53,12 +57,12 @@ def _seed_pilot():
             session.add(cust)
             session.flush()
         # Ensure pilot user is linked
-        from app.db.models import User
         u = session.query(User).filter_by(
             entra_object_id="7e3c6606-aaa6-4c7f-9c5a-f916216f014c"
         ).first()
         if u and u.customer_id != cust.id:
             u.customer_id = cust.id
+            u.role = "admin"
         elif not u:
             session.add(User(
                 entra_object_id="7e3c6606-aaa6-4c7f-9c5a-f916216f014c",
@@ -77,7 +81,7 @@ def _resolve_auth():
     """Authenticate the user and resolve their customer account.
 
     Returns (user_name, user_email, customer_id, customer_name, kv_secret,
-             user_role, user_id).
+             user_role, user_id, is_global_admin).
     """
     if "_auth_resolved" in st.session_state:
         return (
@@ -88,11 +92,12 @@ def _resolve_auth():
             st.session_state["_auth_kv_secret"],
             st.session_state["_auth_user_role"],
             st.session_state["_auth_user_id"],
+            st.session_state["_auth_is_global_admin"],
         )
 
     identity = get_current_user()
     if identity is None:
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, False
 
     with get_session() as session:
         user = get_or_create_user(session, identity)
@@ -107,6 +112,9 @@ def _resolve_auth():
         )
         st.session_state["_auth_user_role"] = user.role
         st.session_state["_auth_user_id"] = user.id
+        st.session_state["_auth_is_global_admin"] = (
+            user.entra_object_id in GLOBAL_ADMIN_IDS
+        )
         st.session_state["_auth_resolved"] = True
 
     return (
@@ -117,6 +125,7 @@ def _resolve_auth():
         st.session_state["_auth_kv_secret"],
         st.session_state["_auth_user_role"],
         st.session_state["_auth_user_id"],
+        st.session_state["_auth_is_global_admin"],
     )
 
 
@@ -298,6 +307,124 @@ def _clear_auth_cache():
             del st.session_state[key]
 
 
+# ── Platform Admin Panel (global admin only) ─────────────────────────────────
+
+def _show_platform_admin():
+    """Platform-level admin panel for creating organizations and their first admin."""
+    import pandas as pd
+
+    st.title("⚙️ Platform Administration")
+    st.caption("Only visible to global administrators.")
+
+    tab_orgs, tab_create = st.tabs(["All Organizations", "Create New Organization"])
+
+    with tab_orgs:
+        with get_session() as session:
+            customers = session.query(Customer).order_by(Customer.name).all()
+            if customers:
+                rows = []
+                for c in customers:
+                    member_count = session.query(User).filter_by(customer_id=c.id).count()
+                    has_key = "✅" if c.key_vault_secret_name else "❌"
+                    rows.append({
+                        "ID": c.id,
+                        "Organization": c.name,
+                        "Members": member_count,
+                        "API Key": has_key,
+                        "Created": c.created_at.strftime("%Y-%m-%d") if c.created_at else "—",
+                    })
+                st.dataframe(
+                    pd.DataFrame(rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # Drill into an org to see members
+                st.markdown("---")
+                st.subheader("Organization Members")
+                org_options = {f"{c.name} (ID {c.id})": c.id for c in customers}
+                sel_org_label = st.selectbox(
+                    "Select organization", list(org_options.keys()),
+                    key="platform_org_select",
+                )
+                sel_org_id = org_options[sel_org_label]
+                members = session.query(User).filter_by(customer_id=sel_org_id).all()
+                if members:
+                    mrows = [{
+                        "Name": m.display_name or "—",
+                        "Email": m.email,
+                        "Role": m.role,
+                        "Joined": m.created_at.strftime("%Y-%m-%d") if m.created_at else "—",
+                    } for m in members]
+                    st.dataframe(pd.DataFrame(mrows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No members yet.")
+            else:
+                st.info("No organizations yet — create one in the next tab.")
+
+    with tab_create:
+        st.markdown(
+            "Create a new organization and pre-register its **first admin**. "
+            "When that person signs in, they'll be prompted to enter their "
+            "LFM API key, then they can invite their own team members."
+        )
+
+        new_org = st.text_input("Organization name", key="platform_new_org")
+        admin_email = st.text_input(
+            "First admin's email",
+            help="This person will be the company admin. They'll set up the API key on first login.",
+            key="platform_admin_email",
+        )
+
+        if st.button("Create Organization & Invite Admin", type="primary", key="btn_platform_create"):
+            if not new_org or not new_org.strip():
+                st.error("Please enter an organization name.")
+            elif not admin_email or "@" not in admin_email:
+                st.error("Please enter a valid email address.")
+            else:
+                with get_session() as session:
+                    # Create the customer
+                    cust = Customer(name=new_org.strip())
+                    session.add(cust)
+                    session.flush()
+
+                    # Check if this user already exists (signed in before)
+                    from app.db.models import PendingInvite
+                    existing = (
+                        session.query(User)
+                        .filter(User.email.ilike(admin_email.strip()))
+                        .first()
+                    )
+                    if existing and existing.customer_id is None:
+                        # Link them directly
+                        existing.customer_id = cust.id
+                        existing.role = "admin"
+                        session.flush()
+                        st.success(
+                            f"**{new_org.strip()}** created! "
+                            f"**{admin_email}** was already registered and is now linked as admin."
+                        )
+                    elif existing and existing.customer_id is not None:
+                        st.warning(
+                            f"**{admin_email}** is already linked to another organization. "
+                            f"Organization **{new_org.strip()}** was created but has no admin yet."
+                        )
+                    else:
+                        # Create a pending invite
+                        session.add(PendingInvite(
+                            email=admin_email.strip().lower(),
+                            customer_id=cust.id,
+                            role="admin",
+                            invited_by="platform-admin",
+                        ))
+                        session.flush()
+                        st.success(
+                            f"**{new_org.strip()}** created! "
+                            f"**{admin_email}** will be set as admin when they sign in."
+                        )
+                st.rerun()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -307,7 +434,7 @@ def main():
         page_icon="🌿",
     )
 
-    user_name, user_email, customer_id, customer_name, kv_secret, user_role, user_id = _resolve_auth()
+    user_name, user_email, customer_id, customer_name, kv_secret, user_role, user_id, is_global_admin = _resolve_auth()
 
     # ── Not authenticated ────────────────────────────────────────────────
     if user_name is None:
@@ -329,47 +456,28 @@ def main():
 
     # ── No customer mapping ──────────────────────────────────────────────
     if customer_id is None:
-        st.title("👋 Welcome")
-        st.markdown(f"Signed in as **{user_email}**")
-
-        tab_new, tab_wait = st.tabs(["Create New Organization", "Waiting for an Invite?"])
-
-        with tab_new:
-            st.markdown(
-                "If you're the **first person** from your company, create your "
-                "organization here. You'll become the admin and can invite "
-                "your team members later."
-            )
-            org_name = st.text_input(
-                "Organization name",
-                placeholder="e.g. Sunshine Farm Co-op",
-                key="new_org_name",
-            )
-            if st.button("Create Organization", type="primary", key="btn_create_org"):
-                if not org_name or not org_name.strip():
-                    st.error("Please enter an organization name.")
-                else:
-                    with get_session() as session:
-                        from app.db.models import User as UserModel
-                        u = session.query(UserModel).filter_by(
-                            entra_object_id=st.session_state["_auth_user"]["object_id"]
-                        ).first()
-                        create_customer_with_admin(session, org_name, u)
-                    _clear_auth_cache()
-                    st.success(f"**{org_name.strip()}** created! Redirecting…")
-                    st.rerun()
-
-        with tab_wait:
-            st.info(
-                "If your administrator has already set up your organization, "
-                "ask them to add your email from their **Team Management** page.\n\n"
-                "Once they invite you, simply **refresh this page** and you'll "
-                "be connected automatically."
-            )
-            if st.button("🔄 Refresh", key="btn_refresh_pending"):
-                _clear_auth_cache()
+        # Global admins can still access the platform panel even without a company
+        if is_global_admin:
+            st.title("⚙️ Platform Administration")
+            st.markdown(f"Signed in as **{user_email}** (Global Admin)")
+            _show_platform_admin()
+            st.markdown("---")
+            if st.button("Sign out", key="btn_signout_global"):
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
                 st.rerun()
+            st.stop()
 
+        st.title("⏳ Account Pending")
+        st.markdown(f"Signed in as **{user_email}**")
+        st.info(
+            "Your account is not yet linked to an organization.\n\n"
+            "Your platform administrator will set up your organization and send you an invite. "
+            "Once that's done, simply **refresh this page** and you'll be connected automatically."
+        )
+        if st.button("🔄 Refresh", key="btn_refresh_pending"):
+            _clear_auth_cache()
+            st.rerun()
         st.markdown("---")
         if st.button("Sign out", key="btn_signout_pending"):
             for key in list(st.session_state.keys()):
@@ -400,6 +508,8 @@ def main():
         pages = ["📊 Dashboard"]
         if user_role == "admin":
             pages.append("👥 Team Management")
+        if is_global_admin:
+            pages.append("⚙️ Platform Admin")
         pages.append("🚪 Sign Out")
         nav = st.radio("Navigate", pages, label_visibility="collapsed", key="nav")
 
@@ -410,6 +520,10 @@ def main():
 
     if nav == "👥 Team Management":
         _show_admin_panel(customer_id, customer_name, user_email)
+        return
+
+    if nav == "⚙️ Platform Admin":
+        _show_platform_admin()
         return
 
     # ── Launch dashboard ─────────────────────────────────────────────────
