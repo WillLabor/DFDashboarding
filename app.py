@@ -143,18 +143,51 @@ def main():
 
     # ── Not authenticated ────────────────────────────────────────────────
     if user_name is None:
-        # On Azure, redirect straight to the Easy Auth login endpoint
         hostname = os.environ.get("WEBSITE_HOSTNAME", "")
         if hostname:
+            # Show debug info so we can diagnose why auth is not resolving
+            st.title("🔒 Authentication Debug")
+            st.markdown("Auth identity could not be resolved. Debug info below:")
+
+            # Show headers (redacted values)
+            headers = dict(getattr(st.context, "headers", {}))
+            auth_headers = {k: v for k, v in headers.items()
+                           if k.lower().startswith("x-ms-")}
+            st.subheader("Easy Auth Headers")
+            if auth_headers:
+                st.json(auth_headers)
+            else:
+                st.warning("No X-Ms-* headers found in WebSocket connection.")
+
+            # Show cookies
+            cookies = dict(getattr(st.context, "cookies", {}))
+            cookie_names = list(cookies.keys())
+            st.subheader("Cookies")
+            st.write(f"Cookie names present: {cookie_names}")
+            has_auth_cookie = "AppServiceAuthSession" in cookies
+            st.write(f"AppServiceAuthSession present: {has_auth_cookie}")
+
+            # Try /.auth/me manually and show result
+            st.subheader("/.auth/me call result")
+            try:
+                import urllib.request, json, ssl
+                auth_cookie = cookies.get("AppServiceAuthSession", "")
+                if auth_cookie:
+                    url = f"https://{hostname}/.auth/me"
+                    req = urllib.request.Request(url)
+                    req.add_header("Cookie", f"AppServiceAuthSession={auth_cookie}")
+                    ctx = ssl.create_default_context()
+                    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                        data = json.loads(resp.read())
+                        st.json(data)
+                else:
+                    st.info("No auth cookie — user has not signed in yet.")
+            except Exception as exc:
+                st.error(f"/.auth/me call failed: {type(exc).__name__}: {exc}")
+
+            # Provide sign-in link (not auto-redirect to avoid loops)
             login_url = f"https://{hostname}/.auth/login/aad?post_login_redirect_uri=/"
-            st.markdown(
-                f'<meta http-equiv="refresh" content="0;url={login_url}">',
-                unsafe_allow_html=True,
-            )
-            st.title("🔒 Redirecting to sign-in…")
-            st.markdown(
-                f"If you are not redirected automatically, [click here]({login_url})."
-            )
+            st.markdown(f"[Click here to sign in]({login_url})")
         else:
             st.title("🔒 Authentication Required")
             if os.environ.get("APP_ENV") == "development":
