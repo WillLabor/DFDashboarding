@@ -201,8 +201,6 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         st.sidebar.markdown(f"👤 **{user_display_name}**")
         st.sidebar.markdown("---")
 
-    source = st.sidebar.radio("Data source", ["API", "CSV upload"], index=0)
-
     # Initialize session state for data persistence
     if "df" not in st.session_state:
         st.session_state.df = None
@@ -221,140 +219,144 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
     customers_df = st.session_state.customers_df
     ml_results = st.session_state.ml_results
 
-    if source == "API":
-        if not managed_mode:
-            st.sidebar.header("API settings")
-            base_url = st.sidebar.text_input("Base URL", DEFAULT_BASE_URL, disabled=True)
-            endpoint = st.sidebar.text_input("Endpoint", DEFAULT_ENDPOINT, disabled=True)
-            api_key = st.sidebar.text_input(
-                "API key",
-                DEFAULT_API_KEY,
-                type="password",
-                disabled=True,
-            )
-        else:
-            base_url = DEFAULT_BASE_URL
-            endpoint = DEFAULT_ENDPOINT
+    if not managed_mode:
+        base_url = DEFAULT_BASE_URL
+        endpoint = DEFAULT_ENDPOINT
+    else:
+        base_url = DEFAULT_BASE_URL
+        endpoint = DEFAULT_ENDPOINT
 
-        st.sidebar.markdown("---")
-        st.sidebar.header("Date filter")
-        last_days = st.sidebar.number_input(
-            "Last N days", min_value=1, max_value=730, value=DEFAULT_LAST_DAYS, step=1
-        )
-        start_date = st.sidebar.text_input(
-            "Start date (ISO)", "", help="Optional: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
-        )
-        end_date = st.sidebar.text_input(
-            "End date (ISO)", "", help="Optional: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
+    st.sidebar.markdown("---")
+    st.sidebar.header("📅 Date Filter")
+
+    from datetime import date, timedelta
+    _default_end = date.today()
+    _default_start = _default_end - timedelta(days=90)
+
+    date_range = st.sidebar.date_input(
+        "Order date range",
+        value=(_default_start, _default_end),
+        min_value=date(2015, 1, 1),
+        max_value=_default_end,
+        help="Select start and end dates. Click to open calendar.",
+        key="order_date_range",
+    )
+    # date_input with range returns a tuple of 1 or 2 dates while user is selecting
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        _start_date_sel, _end_date_sel = date_range
+    else:
+        _start_date_sel = date_range[0] if isinstance(date_range, (list, tuple)) else date_range
+        _end_date_sel = _default_end
+
+    start_date_str = _start_date_sel.isoformat()
+    end_date_str = _end_date_sel.isoformat()
+
+    if st.sidebar.button("🔄 Fetch Orders", use_container_width=True):
+        with st.spinner("Fetching from API…"):
+            try:
+                # Fetch only the selected date range (Option A)
+                df = fetch_orders_from_api(
+                    base_url=base_url,
+                    endpoint=endpoint,
+                    api_key=api_key,
+                    last_days=None,
+                    start_date=start_date_str,
+                    end_date=end_date_str,
+                )
+                st.session_state.df = df
+                st.session_state.selected_start = start_date_str
+                st.session_state.selected_end = end_date_str
+                st.session_state.fetch_start = start_date_str
+                st.session_state.fetch_end = end_date_str
+                st.success(f"Fetched {len(df):,} rows ({start_date_str} → {end_date_str}).")
+            except Exception as exc:
+                st.error(f"Error fetching data: {exc}")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Product Availability")
+
+    # Step 1: fetch the price levels (cheap — 1 API call, cached)
+    if st.sidebar.button("Fetch Price Levels"):
+        with st.spinner("Fetching price levels…"):
+            try:
+                pl_df = fetch_price_levels(base_url=base_url, api_key=api_key)
+                st.session_state.price_levels_df = pl_df
+                price_levels_df = pl_df
+                st.sidebar.success(f"Found {len(pl_df)} price level(s).")
+            except Exception as exc:
+                st.sidebar.error(f"Price levels error: {exc}")
+
+    # Step 2: choose a price level and fetch availability
+    if price_levels_df is not None and not price_levels_df.empty:
+        id_col = "id" if "id" in price_levels_df.columns else price_levels_df.columns[0]
+        name_col = "name" if "name" in price_levels_df.columns else id_col
+        default_col = "default" if "default" in price_levels_df.columns else None
+
+        # Build display labels: "Retail (id=3)" style
+        pl_options = [
+            (int(row[id_col]), str(row[name_col]))
+            for _, row in price_levels_df.iterrows()
+        ]
+        pl_labels = {pl_id: f"{pl_name} (id={pl_id})" for pl_id, pl_name in pl_options}
+
+        selected_pl_id = st.sidebar.selectbox(
+            "Select price level",
+            options=[pl_id for pl_id, _ in pl_options],
+            format_func=lambda x: pl_labels.get(x, str(x)),
+            key="selected_price_level_id",
         )
 
-        if st.sidebar.button("Fetch from API"):
-            with st.spinner("Fetching from API…"):
+        if st.sidebar.button("Fetch Availability"):
+            with st.spinner(f"Fetching availability for price level {pl_labels.get(selected_pl_id)}…"):
                 try:
-                    # Always fetch last 730 days for calculations, but filter display later
-                    df = fetch_orders_from_api(
-                        base_url=base_url,
-                        endpoint=endpoint,
-                        api_key=api_key,
-                        last_days=730,  # Always fetch 2 years
-                        start_date=None,
-                        end_date=None,
-                    )
-                    st.session_state.df = df  # Persist in session state
-                    st.session_state.selected_start, st.session_state.selected_end = _compute_date_range(
-                        last_days, start_date or None, end_date or None
-                    )
-                    st.success("Fetched data successfully.")
-                except Exception as exc:
-                    st.error(f"Error fetching data: {exc}")
-
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Product Availability")
-
-        # Step 1: fetch the price levels (cheap — 1 API call, cached)
-        if st.sidebar.button("Fetch Price Levels"):
-            with st.spinner("Fetching price levels…"):
-                try:
-                    pl_df = fetch_price_levels(base_url=base_url, api_key=api_key)
-                    st.session_state.price_levels_df = pl_df
-                    price_levels_df = pl_df
-                    st.sidebar.success(f"Found {len(pl_df)} price level(s).")
-                except Exception as exc:
-                    st.sidebar.error(f"Price levels error: {exc}")
-
-        # Step 2: choose a price level and fetch availability
-        if price_levels_df is not None and not price_levels_df.empty:
-            id_col = "id" if "id" in price_levels_df.columns else price_levels_df.columns[0]
-            name_col = "name" if "name" in price_levels_df.columns else id_col
-            default_col = "default" if "default" in price_levels_df.columns else None
-
-            # Build display labels: "Retail (id=3)" style
-            pl_options = [
-                (int(row[id_col]), str(row[name_col]))
-                for _, row in price_levels_df.iterrows()
-            ]
-            pl_labels = {pl_id: f"{pl_name} (id={pl_id})" for pl_id, pl_name in pl_options}
-
-            selected_pl_id = st.sidebar.selectbox(
-                "Select price level",
-                options=[pl_id for pl_id, _ in pl_options],
-                format_func=lambda x: pl_labels.get(x, str(x)),
-                key="selected_price_level_id",
-            )
-
-            if st.sidebar.button("Fetch Availability"):
-                with st.spinner(f"Fetching availability for price level {pl_labels.get(selected_pl_id)}…"):
-                    try:
-                        avail_df = fetch_availability_to_df(
-                            base_url=base_url,
-                            api_key=api_key,
-                            price_level_id=selected_pl_id,
-                        )
-                        st.session_state.availability_df = avail_df
-                        availability_df = avail_df
-                        if len(avail_df) > 0:
-                            st.sidebar.success(f"Fetched {len(avail_df)} availability records.")
-                        else:
-                            st.sidebar.warning("API returned 0 records for this price level.")
-                    except Exception as exc:
-                        st.sidebar.error(f"Availability error: {exc}")
-        elif price_levels_df is not None:
-            st.sidebar.warning("No price levels returned by API.")
-        else:
-            st.sidebar.info("Click 'Fetch Price Levels' first.")
-
-        # ── Customer Data ────────────────────────────────────────────────────
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Customer Data")
-
-        from datetime import datetime, timedelta
-        default_since = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
-        cust_since = st.sidebar.text_input(
-            "Last ordered after (ISO)",
-            value=default_since,
-            help="Fetch customers who placed at least one order after this date. Leave blank for all.",
-            key="cust_since_date",
-        )
-        if st.sidebar.button("Fetch Customers"):
-            with st.spinner("Fetching customer data…"):
-                try:
-                    cdf = fetch_customers_from_api(
+                    avail_df = fetch_availability_to_df(
                         base_url=base_url,
                         api_key=api_key,
-                        last_order_after=cust_since.strip() or None,
+                        price_level_id=selected_pl_id,
                     )
-                    st.session_state.customers_df = cdf
-                    customers_df = cdf
-                    st.sidebar.success(f"Fetched {len(cdf)} customers.")
+                    st.session_state.availability_df = avail_df
+                    availability_df = avail_df
+                    if len(avail_df) > 0:
+                        st.sidebar.success(f"Fetched {len(avail_df)} availability records.")
+                    else:
+                        st.sidebar.warning("API returned 0 records for this price level.")
                 except Exception as exc:
-                    st.sidebar.error(f"Customer fetch error: {exc}")
+                    st.sidebar.error(f"Availability error: {exc}")
+    elif price_levels_df is not None:
+        st.sidebar.warning("No price levels returned by API.")
+    else:
+        st.sidebar.info("Click 'Fetch Price Levels' first.")
 
-        if customers_df is not None:
-            st.sidebar.caption(f"{len(customers_df)} customers loaded.")
-        csv_file = st.sidebar.file_uploader("Upload a CSV file", type=["csv"])
-        if csv_file is not None:
-            df = pd.read_csv(csv_file)
-            st.session_state.df = df  # Persist in session state
+    # ── Customer Data ────────────────────────────────────────────────────
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Customer Data")
+
+    from datetime import datetime
+    default_since = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+    cust_since = st.sidebar.date_input(
+        "Last ordered after",
+        value=date.today() - timedelta(days=730),
+        min_value=date(2015, 1, 1),
+        max_value=date.today(),
+        help="Fetch customers who placed at least one order after this date.",
+        key="cust_since_date",
+    )
+    if st.sidebar.button("Fetch Customers", use_container_width=True):
+        with st.spinner("Fetching customer data…"):
+            try:
+                cdf = fetch_customers_from_api(
+                    base_url=base_url,
+                    api_key=api_key,
+                    last_order_after=cust_since.isoformat() if cust_since else None,
+                )
+                st.session_state.customers_df = cdf
+                customers_df = cdf
+                st.sidebar.success(f"Fetched {len(cdf)} customers.")
+            except Exception as exc:
+                st.sidebar.error(f"Customer fetch error: {exc}")
+
+    if customers_df is not None:
+        st.sidebar.caption(f"{len(customers_df)} customers loaded.")
 
     # Determine what data is available to decide default view and visibility
     has_orders    = df is not None
@@ -371,14 +373,41 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
     if has_orders:
         st.sidebar.write(f"Orders loaded: {df.shape[0]:,} rows")
 
-    # Default view: Customer Segments when only customer data is available
-    default_view_index = 2 if (has_customers and not has_orders) else 1
+    # ── View picker in the main area ─────────────────────────────────────────
+    VIEW_LABELS = {
+        "Order value analysis": "📊 Orders",
+        "Customer Segments":    "👥 Segments",
+        "Customer LTV":         "💰 LTV",
+        "Product Trends":       "📦 Products",
+        "Product Availability": "📋 Availability",
+        "Preview":              "🔍 Preview",
+    }
+    VIEW_KEYS = list(VIEW_LABELS.keys())
+    VIEW_DISPLAY = [VIEW_LABELS[k] for k in VIEW_KEYS]
 
-    view = st.sidebar.selectbox(
-        "View",
-        ["Preview", "Order value analysis", "Customer Segments", "Customer LTV", "Product Trends", "Product Availability"],
-        index=default_view_index,
-    )
+    # Default view index
+    default_view_index = 1 if has_orders else (2 if has_customers else 0)
+    if "selected_view" not in st.session_state:
+        st.session_state.selected_view = VIEW_KEYS[default_view_index]
+
+    # Pill-style tab row
+    st.markdown("""
+    <style>
+    div[data-testid="stHorizontalBlock"] div[data-testid="column"] button[kind="secondary"] {
+        border-radius: 20px !important; font-size: 0.82rem !important; padding: 4px 14px !important;
+    }
+    </style>""", unsafe_allow_html=True)
+
+    tab_cols = st.columns(len(VIEW_KEYS))
+    for i, (key, label) in enumerate(zip(VIEW_KEYS, VIEW_DISPLAY)):
+        is_active = (st.session_state.selected_view == key)
+        btn_type = "primary" if is_active else "secondary"
+        if tab_cols[i].button(label, key=f"view_btn_{i}", type=btn_type, use_container_width=True):
+            st.session_state.selected_view = key
+            st.rerun()
+
+    view = st.session_state.selected_view
+    st.markdown("<hr style='margin:0.3rem 0 1rem; border-color:#c3ddb8;'>", unsafe_allow_html=True)
 
     # ── ML Scoring sidebar (Customer Segments only) ─────────────────────────
     if view == "Customer Segments" and has_customers:
@@ -410,15 +439,6 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             if upgrade_auc:
                 st.sidebar.caption(f"Upgrade model ROC-AUC: **{upgrade_auc:.2f}**")
 
-    if view == "Order value analysis" and has_orders:
-        # Add status filter if orderStatus column exists
-        status_options = ["All"]
-        if "orderStatus" in df.columns:
-            unique_statuses = sorted(df["orderStatus"].dropna().unique())
-            status_options.extend(unique_statuses)
-        complete_index = status_options.index("COMPLETE") if "COMPLETE" in status_options else 0
-        selected_status = st.sidebar.selectbox("Order Status Filter", status_options, index=complete_index)
-
     if view == "Preview":
         if not has_orders:
             st.info("Fetch order data first using 'Fetch from API' in the sidebar.")
@@ -448,10 +468,10 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             )
             return
 
-        status_filter = None if selected_status == "All" else selected_status
-
         from src.order_analysis import extract_orders_at_order_level
-        order_df_full = extract_orders_at_order_level(df, status_filter=status_filter)
+        # Load all orders with no status filter so customer history lookups are complete.
+        # Status filtering is applied after the page filter bar (see _filtered_full below).
+        order_df_full = extract_orders_at_order_level(df, status_filter=None)
         order_df_full["periodStart"] = pd.to_datetime(order_df_full["periodStart"], errors="coerce")
         order_df_full["customerType"] = order_df_full["customerType"].str.strip()
 
@@ -530,13 +550,24 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                     key="period_week_filter",
                 )
 
-            ctype_col, _ = st.columns([1, 2])
+            ctype_col, status_col = st.columns([1, 1])
             with ctype_col:
                 selected_types = st.multiselect(
-                    "Filter by Customer Type",
+                    "Customer Type",
                     options=all_ctypes,
                     default=all_ctypes,
                     key="ctype_filter",
+                )
+            with status_col:
+                status_options = ["All"]
+                if "orderStatus" in order_df_full.columns:
+                    status_options.extend(sorted(order_df_full["orderStatus"].dropna().unique()))
+                complete_index = status_options.index("COMPLETE") if "COMPLETE" in status_options else 0
+                selected_status = st.selectbox(
+                    "Order Status",
+                    options=status_options,
+                    index=complete_index,
+                    key="order_status_filter",
                 )
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -563,9 +594,16 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             st.info("No periodStart values match your Year/Month/Week filters.")
             return
 
-        display_df = order_df_full[
-            order_df_full["periodStart"].isin(selected_periods) &
-            order_df_full["customerType"].isin(selected_types)
+        # Apply status filter (set by page filter bar above)
+        status_filter = None if selected_status == "All" else selected_status
+        if status_filter is not None and "orderStatus" in order_df_full.columns:
+            _filtered_full = order_df_full[order_df_full["orderStatus"] == status_filter]
+        else:
+            _filtered_full = order_df_full
+
+        display_df = _filtered_full[
+            _filtered_full["periodStart"].isin(selected_periods) &
+            _filtered_full["customerType"].isin(selected_types)
         ]
 
         # --- Build per-(period, customerType) metrics ---
@@ -645,7 +683,14 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
 
         # --- KPI cards ---
         st.markdown('<p class="section-header">Summary</p>', unsafe_allow_html=True)
-        st.caption("* Metrics marked with * use rolling 2-year data")
+        _fetch_start = getattr(st.session_state, 'fetch_start', None)
+        _fetch_end   = getattr(st.session_state, 'fetch_end', None)
+        _range_label = f"{_fetch_start} → {_fetch_end}" if _fetch_start and _fetch_end else "fetched range"
+        st.info(
+            f"📊 **Revenue, Orders & AOV** reflect your selected filters. "
+            f"**Metrics marked \\*** use all loaded data ({_range_label}) for accurate customer history.",
+            icon=None,
+        )
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Revenue", f"${total_revenue:,.2f}")
         c2.metric("Total Orders", f"{total_orders:,}")
