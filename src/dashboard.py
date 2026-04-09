@@ -1210,14 +1210,19 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                     key="prod_period_filter",
                 )
 
-            # Product search — only shown after producers are selected
-            prod_search = ""
+            # Product multiselect — only shown after producers are selected, options driven by producer selection
+            selected_products_prod = []
             if selected_producers_prod:
-                prod_search = st.text_input(
-                    "🔍 Search products",
-                    value="",
-                    placeholder="Type to filter product names…",
-                    key="prod_search_box",
+                available_products = sorted(
+                    product_df[product_df["producerName"].isin(selected_producers_prod)]["productName"]
+                    .dropna().unique().tolist()
+                )
+                selected_products_prod = st.multiselect(
+                    "Product",
+                    options=available_products,
+                    default=available_products,
+                    key="prod_product_filter",
+                    placeholder="Choose products… (all selected by default)",
                 )
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1229,15 +1234,12 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             return
 
         # Apply filters
+        _prod_filter = selected_products_prod if selected_products_prod else []
         filtered_products = product_df[
             product_df["producerName"].isin(selected_producers_prod) &
-            product_df["periodStart"].isin(selected_product_periods)
+            product_df["periodStart"].isin(selected_product_periods) &
+            (product_df["productName"].isin(_prod_filter) if _prod_filter else True)
         ].copy()
-
-        if prod_search.strip():
-            filtered_products = filtered_products[
-                filtered_products["productName"].str.contains(prod_search.strip(), case=False, na=False)
-            ]
 
         if filtered_products.empty:
             st.info("No data matches your current filters.")
