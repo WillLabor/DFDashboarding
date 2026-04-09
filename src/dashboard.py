@@ -150,6 +150,21 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         font-weight: 700;
     }
     .stProgress > div > div { background-color: #4a7c3f !important; }
+    /* Compact multiselect: clamp tag area to one line, hide overflow */
+    [data-testid="stMultiSelect"] [data-baseweb="select"] > div:first-child {
+        max-height: 40px !important;
+        overflow: hidden !important;
+        flex-wrap: nowrap !important;
+    }
+    [data-testid="stMultiSelect"] [data-baseweb="tag"] {
+        height: 26px !important;
+        font-size: 0.72rem !important;
+        padding: 0 6px !important;
+        max-width: 140px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1194,18 +1209,31 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             st.markdown('<div class="filter-bar">', unsafe_allow_html=True)
             pf_col1, pf_col2 = st.columns([1, 1])
             with pf_col1:
+                _prev_prod = st.session_state.get("prod_producer_filter", [])
+                _prod_label = (
+                    f"Producer — {len(_prev_prod)} selected"
+                    if _prev_prod else "Producer (select to begin)"
+                )
                 selected_producers_prod = st.multiselect(
-                    "Producer (select to begin)",
+                    _prod_label,
                     options=all_producers_product,
                     default=[],
                     key="prod_producer_filter",
                     placeholder="Choose one or more producers…",
                 )
             with pf_col2:
+                _n_periods_all = len(unique_periods_product)
+                _prev_periods = st.session_state.get("prod_period_filter", unique_periods_product[-12:] if _n_periods_all > 12 else unique_periods_product)
+                _n_periods_sel = len(_prev_periods)
+                _period_label = (
+                    f"Period — All {_n_periods_all}"
+                    if _n_periods_sel == _n_periods_all
+                    else f"Period — {_n_periods_sel} of {_n_periods_all}"
+                )
                 selected_product_periods = st.multiselect(
-                    "Period",
+                    _period_label,
                     options=unique_periods_product,
-                    default=unique_periods_product[-12:] if len(unique_periods_product) > 12 else unique_periods_product,
+                    default=unique_periods_product[-12:] if _n_periods_all > 12 else unique_periods_product,
                     format_func=lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '',
                     key="prod_period_filter",
                 )
@@ -1217,12 +1245,22 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                     product_df[product_df["producerName"].isin(selected_producers_prod)]["productName"]
                     .dropna().unique().tolist()
                 )
+                _prev_prods = st.session_state.get("prod_product_filter", available_products)
+                # Keep only values still valid for current producer selection
+                _prev_prods = [p for p in _prev_prods if p in available_products]
+                _n_prods_sel = len(_prev_prods) if _prev_prods else len(available_products)
+                _n_prods_all = len(available_products)
+                _prods_label = (
+                    f"Product — All {_n_prods_all}"
+                    if _n_prods_sel == _n_prods_all
+                    else f"Product — {_n_prods_sel} of {_n_prods_all} selected"
+                )
                 selected_products_prod = st.multiselect(
-                    "Product",
+                    _prods_label,
                     options=available_products,
                     default=available_products,
                     key="prod_product_filter",
-                    placeholder="Choose products… (all selected by default)",
+                    placeholder="All products selected by default",
                 )
             st.markdown('</div>', unsafe_allow_html=True)
 
