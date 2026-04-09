@@ -1171,125 +1171,256 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
 
         # Validate required columns
         required_product_cols = {"productName", "producerName", "periodStart", "qty"}
-        available_cols = set(product_df.columns)
-        missing = required_product_cols - available_cols
-
-        if missing:
+        if not required_product_cols.issubset(set(product_df.columns)):
+            missing = required_product_cols - set(product_df.columns)
             st.warning(f"Missing columns for product analysis: {', '.join(sorted(missing))}")
             return
 
-        unique_periods_product = sorted(product_df["periodStart"].dropna().unique())
-        all_producers_product = sorted(product_df["producerName"].dropna().unique())
+        # Identify available money columns (present in orders data when available)
+        has_revenue = "customerPriceExt" in product_df.columns
+        has_cost    = "costExt" in product_df.columns
+        if has_revenue:
+            product_df["customerPriceExt"] = pd.to_numeric(product_df["customerPriceExt"], errors="coerce").fillna(0)
+        if has_cost:
+            product_df["costExt"] = pd.to_numeric(product_df["costExt"], errors="coerce").fillna(0)
+        if has_revenue and has_cost:
+            product_df["margin"] = product_df["customerPriceExt"] - product_df["costExt"]
 
-        # --- Product Filters ---
+        unique_periods_product = sorted(product_df["periodStart"].dropna().unique())
+        all_producers_product  = sorted(product_df["producerName"].dropna().unique())
+
+        # ── Filter bar ────────────────────────────────────────────────────────
         with st.container():
             st.markdown('<div class="filter-bar">', unsafe_allow_html=True)
-            filter_col1, filter_col2 = st.columns([1, 1])
-            with filter_col1:
+            pf_col1, pf_col2 = st.columns([1, 1])
+            with pf_col1:
                 selected_producers_prod = st.multiselect(
-                    "Filter by Producer",
+                    "Producer (select to begin)",
                     options=all_producers_product,
-                    default=all_producers_product[:5] if len(all_producers_product) > 5 else all_producers_product,
+                    default=[],
                     key="prod_producer_filter",
+                    placeholder="Choose one or more producers…",
                 )
-            with filter_col2:
+            with pf_col2:
                 selected_product_periods = st.multiselect(
-                    "Filter by Period Start",
+                    "Period",
                     options=unique_periods_product,
                     default=unique_periods_product[-12:] if len(unique_periods_product) > 12 else unique_periods_product,
                     format_func=lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '',
                     key="prod_period_filter",
                 )
+
+            # Product search — only shown after producers are selected
+            prod_search = ""
+            if selected_producers_prod:
+                prod_search = st.text_input(
+                    "🔍 Search products",
+                    value="",
+                    placeholder="Type to filter product names…",
+                    key="prod_search_box",
+                )
             st.markdown('</div>', unsafe_allow_html=True)
 
         if not selected_producers_prod:
-            st.info("Select at least one producer.")
+            st.info("Select one or more producers above to begin.")
             return
         if not selected_product_periods:
             st.info("Select at least one period.")
             return
 
-        # Filter data
+        # Apply filters
         filtered_products = product_df[
             product_df["producerName"].isin(selected_producers_prod) &
             product_df["periodStart"].isin(selected_product_periods)
-        ]
+        ].copy()
 
-        # --- Producer-level trends by quantity ordered ---
-        st.markdown('<p class="section-header">Unit Sales Trends by Producer</p>', unsafe_allow_html=True)
-        producer_qty_trends = filtered_products.groupby(["periodStart", "producerName"]).agg(
-            total_qty=("qty", "sum"),
-            num_orders=("orderId", "nunique"),
-            num_products=("productName", "nunique"),
-        ).reset_index()
-        producer_qty_trends["Period Label"] = producer_qty_trends["periodStart"].dt.strftime('%Y-%m-%d')
+        if prod_search.strip():
+            filtered_products = filtered_products[
+                filtered_products["productName"].str.contains(prod_search.strip(), case=False, na=False)
+            ]
+
+        if filtered_products.empty:
+            st.info("No data matches your current filters.")
+            return
+
+        # ── Top Products Summary (at top) ─────────────────────────────────────
+        st.markdown('<p class="section-header">Top Products Summary — by Volume & Margin</p>', unsafe_allow_html=True)
+
+        _agg: dict = {"qty": "sum"}
+        if has_revenue:
+            _agg["customerPriceExt"] = "sum"
+        if has_cost:
+            _agg["costExt"] = "sum"
+        if has_revenue and has_cost:
+            _agg["margin"] = "sum"
+
+        prod_summary_all = (
+            filtered_products.groupby(["producerName", "productName"])
+            .agg(**{k: (k, v) for k, v in _agg.items()})
+            .reset_index()
+            .rename(columns={
+                "qty": "Total Units",
+                "customerPriceExt": "Revenue ($)",
+                "costExt": "Cost ($)",
+                "margin": "Margin ($)",
+            })
+        )
+
+        top_n = 5
+        sum_col1, sum_col2 = st.columns(2)
+
+        with sum_col1:
+            st.markdown("**📦 Top Products by Volume**")
+            top_vol = prod_summary_all.nlargest(top_n * len(selected_producers_prod), "Total Units")
+            fig_vol = px.bar(
+                top_vol.head(top_n * max(1, len(selected_producers_prod))),
+                x="Total Units",
+                y="productName",
+                color="producerName",
+                orientation="h",
+                template="plotly_dark" if dark else "plotly_white",
+                labels={"productName": "", "producerName": "Producer"},
+                title=f"Top {top_n} Products per Producer — Units",
+            )
+            fig_vol.update_layout(yaxis=dict(autorange="reversed"), margin=dict(l=0, r=0, t=40, b=0), height=320, showlegend=True)
+            st.plotly_chart(fig_vol, use_container_width=True)
+
+        with sum_col2:
+            if has_revenue and has_cost and "Margin ($)" in prod_summary_all.columns:
+                st.markdown("**💰 Top Products by Margin**")
+                top_margin = prod_summary_all.nlargest(top_n * max(1, len(selected_producers_prod)), "Margin ($)")
+                fig_margin = px.bar(
+                    top_margin.head(top_n * max(1, len(selected_producers_prod))),
+                    x="Margin ($)",
+                    y="productName",
+                    color="producerName",
+                    orientation="h",
+                    template="plotly_dark" if dark else "plotly_white",
+                    labels={"productName": "", "producerName": "Producer"},
+                    title=f"Top {top_n} Products per Producer — Margin ($)",
+                )
+                fig_margin.update_layout(yaxis=dict(autorange="reversed"), margin=dict(l=0, r=0, t=40, b=0), height=320, showlegend=True)
+                st.plotly_chart(fig_margin, use_container_width=True)
+            elif has_revenue and "Revenue ($)" in prod_summary_all.columns:
+                st.markdown("**💰 Top Products by Revenue**")
+                top_rev = prod_summary_all.nlargest(top_n * max(1, len(selected_producers_prod)), "Revenue ($)")
+                fig_rev2 = px.bar(
+                    top_rev.head(top_n * max(1, len(selected_producers_prod))),
+                    x="Revenue ($)",
+                    y="productName",
+                    color="producerName",
+                    orientation="h",
+                    template="plotly_dark" if dark else "plotly_white",
+                    labels={"productName": "", "producerName": "Producer"},
+                    title=f"Top {top_n} Products per Producer — Revenue ($)",
+                )
+                fig_rev2.update_layout(yaxis=dict(autorange="reversed"), margin=dict(l=0, r=0, t=40, b=0), height=320, showlegend=True)
+                st.plotly_chart(fig_rev2, use_container_width=True)
+            else:
+                st.info("Cost/revenue data not available in this dataset for margin analysis.")
+
+        # Full summary table
+        with st.expander("📋 Full product summary table", expanded=False):
+            disp_cols = ["producerName", "productName", "Total Units"]
+            if "Revenue ($)" in prod_summary_all.columns:
+                disp_cols.append("Revenue ($)")
+            if "Cost ($)" in prod_summary_all.columns:
+                disp_cols.append("Cost ($)")
+            if "Margin ($)" in prod_summary_all.columns:
+                disp_cols.append("Margin ($)")
+            st.dataframe(
+                prod_summary_all[disp_cols].sort_values("Total Units", ascending=False).round(2),
+                use_container_width=True, height=300,
+            )
+
+        # ── Trend chart over time ──────────────────────────────────────────────
+        st.markdown('<p class="section-header">Trends Over Time by Producer</p>', unsafe_allow_html=True)
+
+        trend_metric_options: dict[str, str] = {"Total Units": "qty"}
+        if has_revenue:
+            trend_metric_options["Total Revenue ($)"] = "customerPriceExt"
+        if has_cost:
+            trend_metric_options["Total Cost ($)"] = "costExt"
+        if has_revenue and has_cost:
+            trend_metric_options["Margin (Revenue − Cost)"] = "margin"
+
+        selected_trend_label = st.selectbox(
+            "Metric",
+            options=list(trend_metric_options.keys()),
+            index=0,
+            key="prod_trend_metric",
+        )
+        trend_col = trend_metric_options[selected_trend_label]
+
+        producer_trends = (
+            filtered_products.groupby(["periodStart", "producerName"])
+            .agg(**{trend_col: (trend_col, "sum")})
+            .reset_index()
+        )
+        producer_trends["Period Label"] = producer_trends["periodStart"].dt.strftime('%Y-%m-%d')
 
         fig_producer = px.line(
-            producer_qty_trends,
+            producer_trends,
             x="Period Label",
-            y="total_qty",
+            y=trend_col,
             color="producerName",
             markers=True,
             template="plotly_dark" if dark else "plotly_white",
-            labels={"Period Label": "Period", "total_qty": "Total Units Sold", "producerName": "Producer"},
-            title="Total Units Ordered by Producer Over Time",
+            labels={"Period Label": "Period", trend_col: selected_trend_label, "producerName": "Producer"},
+            title=f"{selected_trend_label} by Producer Over Time",
         )
         fig_producer.update_traces(line=dict(width=2.5), marker=dict(size=7))
         fig_producer.update_layout(
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             hovermode="x unified",
             margin=dict(l=0, r=0, t=30, b=0),
-            height=400,
+            height=420,
         )
         st.plotly_chart(fig_producer, use_container_width=True)
 
-        # --- Producer summary table ---
-        st.markdown('<p class="section-header">Producer Summary (Selected Periods)</p>', unsafe_allow_html=True)
-        producer_summary = filtered_products.groupby("producerName").agg(
-            products=("productName", "nunique"),
-            total_units=("qty", "sum"),
-            avg_units_per_order=("qty", "mean"),
-            num_orders=("orderId", "nunique"),
-        ).reset_index().round(2)
-        producer_summary = producer_summary.sort_values("total_units", ascending=False)
-
-        st.dataframe(producer_summary, use_container_width=True, height=300)
-
-        # --- Product-level trends ---
-        st.markdown('<p class="section-header">Top Products by Producer</p>', unsafe_allow_html=True)
+        # ── Product drill-down ─────────────────────────────────────────────────
+        st.markdown('<p class="section-header">Product Detail by Producer</p>', unsafe_allow_html=True)
         selected_producer_detail = st.selectbox(
-            "Select a producer to see top products",
+            "Select a producer",
             options=sorted(selected_producers_prod),
             key="detail_producer_prod",
         )
 
         if selected_producer_detail:
             producer_products = filtered_products[filtered_products["producerName"] == selected_producer_detail]
-            product_trends = producer_products.groupby(["periodStart", "productName"]).agg(
-                total_qty=("qty", "sum"),
-            ).reset_index()
-            product_trends["Period Label"] = product_trends["periodStart"].dt.strftime('%Y-%m-%d')
-            
-            # Show top 5 products by total quantity
-            top_products = producer_products.groupby("productName")["qty"].sum().nlargest(5).index.tolist()
-            product_trends_top = product_trends[product_trends["productName"].isin(top_products)]
+
+            product_trends_df = (
+                producer_products.groupby(["periodStart", "productName"])
+                .agg(**{trend_col: (trend_col, "sum")})
+                .reset_index()
+            )
+            product_trends_df["Period Label"] = product_trends_df["periodStart"].dt.strftime('%Y-%m-%d')
+
+            # Top 10 products by selected metric
+            top_products = (
+                producer_products.groupby("productName")[trend_col]
+                .sum()
+                .nlargest(10)
+                .index.tolist()
+            )
+            product_trends_top = product_trends_df[product_trends_df["productName"].isin(top_products)]
 
             fig_product = px.line(
                 product_trends_top,
                 x="Period Label",
-                y="total_qty",
+                y=trend_col,
                 color="productName",
                 markers=True,
                 template="plotly_dark" if dark else "plotly_white",
-                labels={"Period Label": "Period", "total_qty": "Units Ordered"},
-                title=f"Top 5 Products - {selected_producer_detail}",
+                labels={"Period Label": "Period", trend_col: selected_trend_label},
+                title=f"Top 10 Products — {selected_producer_detail} — {selected_trend_label}",
             )
             fig_product.update_traces(line=dict(width=2.5), marker=dict(size=7))
             fig_product.update_layout(
                 legend=dict(orientation="v", yanchor="top", y=0.99, xanchor="right", x=0.99),
                 hovermode="x unified",
                 margin=dict(l=0, r=0, t=30, b=0),
-                height=400,
+                height=420,
             )
             st.plotly_chart(fig_product, use_container_width=True)
 
