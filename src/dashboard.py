@@ -1519,8 +1519,19 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                 })
             _rpt_df = pd.DataFrame(_rpt_rows).sort_values("Repeat Rate %", ascending=False)
 
+            def _repeat_rating(r):
+                if r >= 55: return "⭐ Strong"
+                if r >= 35: return "🟢 Good"
+                if r >= 15: return "🟡 Moderate"
+                return "🔴 Low"
+
+            _rpt_df["Rating"] = _rpt_df["Repeat Rate %"].apply(_repeat_rating)
+
             st.markdown("**Repeat Purchase Rate by Product**")
-            st.caption("A buyer counts as 'repeat' if they ordered that specific product in more than one period.")
+            st.caption(
+                "A buyer counts as 'repeat' if they ordered that specific product in more than one period. "
+                "Benchmarks: 🔴 <15% (low) · 🟡 15–35% (moderate) · 🟢 35–55% (good) · ⭐ 55%+ (strong)"
+            )
             st.dataframe(
                 _rpt_df,
                 column_config={
@@ -1530,7 +1541,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                 },
                 use_container_width=True,
                 hide_index=True,
-                height=min(220, 38 + 35 * len(_rpt_df)),
+                height=min(260, 38 + 35 * len(_rpt_df)),
             )
 
             # ── Stacked bar — New vs Returning per period ──────────────────────
@@ -1573,6 +1584,16 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                 )
                 _fig_ret.update_yaxes(range=[0, 105], ticksuffix="%")
                 _fig_ret.update_xaxes(tickangle=45)
+                # Reference line at 40% returning — healthy target for a mature product
+                _fig_ret.add_hline(
+                    y=40,
+                    line_dash="dash",
+                    line_color="#aaaaaa",
+                    line_width=1.5,
+                    annotation_text="🎯 40% returning target",
+                    annotation_position="top left",
+                    annotation_font_size=11,
+                )
                 _fig_ret.update_layout(
                     height=420 if len(_sel_ret_prods) <= 2 else 620,
                     margin=dict(l=0, r=0, t=50, b=60),
@@ -1584,6 +1605,11 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                     lambda a: a.update(text=a.text.split("=")[-1])
                 )
                 st.plotly_chart(_fig_ret, use_container_width=True)
+                st.caption(
+                    "📊 Benchmark: healthy mature products see 40%+ returning buyers per period. "
+                    "High new-buyer % is normal in early weeks — watch if it persists beyond 3 months. "
+                    "⚠️ Seasonal products (e.g. summer squash) will naturally reset each season."
+                )
 
         # ── Product drill-down ─────────────────────────────────────────────────
         st.markdown('<p class="section-header">Product Detail by Producer</p>', unsafe_allow_html=True)
