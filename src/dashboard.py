@@ -287,15 +287,20 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             except Exception as exc:
                 st.error(f"Error fetching data: {exc}")
 
-    # Show latest order date from loaded data
+    # Show latest orderDate from loaded data — indicates if API is current
     if st.session_state.df is not None and not st.session_state.df.empty:
         _loaded_df = st.session_state.df
-        if "periodStart" in _loaded_df.columns:
-            _max_date = pd.to_datetime(_loaded_df["periodStart"], errors="coerce").max()
+        if "orderDate" in _loaded_df.columns:
+            _max_date = pd.to_datetime(_loaded_df["orderDate"], errors="coerce").max()
             if pd.notna(_max_date):
                 _days_ago = (pd.Timestamp.now().normalize() - _max_date.normalize()).days
-                _freshness = f"{_days_ago}d ago" if _days_ago > 0 else "today"
-                st.sidebar.caption(f"📅 Latest order in data: **{_max_date.strftime('%b %d, %Y')}** ({_freshness})")
+                if _days_ago == 0:
+                    _freshness = "✅ today"
+                elif _days_ago <= 3:
+                    _freshness = f"✅ {_days_ago}d ago"
+                else:
+                    _freshness = f"⚠️ {_days_ago}d ago"
+                st.sidebar.caption(f"🕐 Latest order date: **{_max_date.strftime('%b %d, %Y')}** ({_freshness})")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Product Availability")
