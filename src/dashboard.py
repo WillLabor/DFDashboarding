@@ -1433,6 +1433,158 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         )
         st.plotly_chart(fig_producer, use_container_width=True)
 
+        # ── Product Buyer Retention ────────────────────────────────────────────
+        st.markdown('<p class="section-header">Product Buyer Retention</p>', unsafe_allow_html=True)
+        st.caption("Are the same people re-ordering, or does each period bring new buyers who never come back?")
+
+        _email_col_prod = "email" if "email" in filtered_products.columns else None
+
+        if _email_col_prod is None:
+            st.info("Email data not available — buyer retention requires customer email in the dataset.")
+        else:
+            # Build first-purchase lookup using ALL loaded data so history outside the
+            # selected period window is still captured (a buyer isn't "new" just because
+            # their first order pre-dates our filter).
+            _base_ret = product_df[
+                product_df["producerName"].isin(selected_producers_prod)
+            ].dropna(subset=[_email_col_prod, "productName", "periodStart"])
+            if _prod_filter:
+                _base_ret = _base_ret[_base_ret["productName"].isin(_prod_filter)]
+
+            _first_purchase = (
+                _base_ret.groupby([_email_col_prod, "productName"])["periodStart"]
+                .min()
+                .rename("first_period")
+                .reset_index()
+            )
+
+            # Tag each row in the filtered view as New or Returning for this product
+            _ret_tagged = filtered_products.dropna(subset=[_email_col_prod]).merge(
+                _first_purchase, on=[_email_col_prod, "productName"], how="left"
+            )
+            _ret_tagged["buyer_type"] = _ret_tagged.apply(
+                lambda r: "New Buyers"
+                if pd.isna(r["first_period"]) or r["periodStart"] == r["first_period"]
+                else "Returning Buyers",
+                axis=1,
+            )
+
+            # One row per buyer per (product, period) — avoid counting duplicate line items
+            _ret_deduped = _ret_tagged.drop_duplicates(
+                subset=[_email_col_prod, "productName", "periodStart"]
+            )
+            _ret_counts = (
+                _ret_deduped.groupby(["productName", "periodStart", "buyer_type"])
+                .size()
+                .reset_index(name="count")
+            )
+            _retention_df = _ret_counts.pivot_table(
+                index=["productName", "periodStart"],
+                columns="buyer_type",
+                values="count",
+                fill_value=0,
+            ).reset_index()
+            _retention_df.columns.name = None
+            for _c in ["New Buyers", "Returning Buyers"]:
+                if _c not in _retention_df.columns:
+                    _retention_df[_c] = 0
+            _retention_df["Total Buyers"] = (
+                _retention_df["New Buyers"] + _retention_df["Returning Buyers"]
+            )
+            _retention_df["New %"] = (
+                _retention_df["New Buyers"]
+                / _retention_df["Total Buyers"].replace(0, pd.NA)
+                * 100
+            ).fillna(0)
+            _retention_df["Returning %"] = (
+                _retention_df["Returning Buyers"]
+                / _retention_df["Total Buyers"].replace(0, pd.NA)
+                * 100
+            ).fillna(0)
+
+            # ── Repeat Rate summary table ──────────────────────────────────────
+            _rpt_rows = []
+            for _prod in sorted(_retention_df["productName"].unique()):
+                _pbdf = filtered_products[
+                    filtered_products["productName"] == _prod
+                ].dropna(subset=[_email_col_prod])
+                _bp = _pbdf.groupby(_email_col_prod)["periodStart"].nunique()
+                _ub = len(_bp)
+                _rb = int((_bp > 1).sum())
+                _rpt_rows.append({
+                    "Product": _prod,
+                    "Unique Buyers": _ub,
+                    "Repeat Buyers": _rb,
+                    "Repeat Rate %": round(_rb / _ub * 100, 1) if _ub else 0.0,
+                })
+            _rpt_df = pd.DataFrame(_rpt_rows).sort_values("Repeat Rate %", ascending=False)
+
+            st.markdown("**Repeat Purchase Rate by Product**")
+            st.caption("A buyer counts as 'repeat' if they ordered that specific product in more than one period.")
+            st.dataframe(
+                _rpt_df,
+                column_config={
+                    "Repeat Rate %": st.column_config.ProgressColumn(
+                        "Repeat Rate %", format="%.1f%%", min_value=0, max_value=100
+                    ),
+                },
+                use_container_width=True,
+                hide_index=True,
+                height=min(220, 38 + 35 * len(_rpt_df)),
+            )
+
+            # ── Stacked bar — New vs Returning per period ──────────────────────
+            st.markdown("**New vs. Returning Buyers per Period**")
+            _avail_ret_prods = sorted(_retention_df["productName"].unique().tolist())
+            _ret_default = _avail_ret_prods[: min(3, len(_avail_ret_prods))]
+            _sel_ret_prods = st.multiselect(
+                "Select products to compare (max 5)",
+                options=_avail_ret_prods,
+                default=_ret_default,
+                max_selections=5,
+                key="retention_product_select",
+            )
+
+            if _sel_ret_prods:
+                _ret_plot = _retention_df[
+                    _retention_df["productName"].isin(_sel_ret_prods)
+                ].copy()
+                _ret_plot["Period Label"] = _ret_plot["periodStart"].dt.strftime("%Y-%m-%d")
+                _ret_melted = _ret_plot.melt(
+                    id_vars=["productName", "Period Label"],
+                    value_vars=["New %", "Returning %"],
+                    var_name="Buyer Type",
+                    value_name="Percentage",
+                )
+                _facet_wrap = min(2, len(_sel_ret_prods))
+                _fig_ret = px.bar(
+                    _ret_melted,
+                    x="Period Label",
+                    y="Percentage",
+                    color="Buyer Type",
+                    facet_col="productName",
+                    facet_col_wrap=_facet_wrap,
+                    color_discrete_map={"New %": "#f4845f", "Returning %": "#4caf82"},
+                    barmode="stack",
+                    template="plotly_dark" if dark else "plotly_white",
+                    labels={"Period Label": "Period", "Percentage": "%", "productName": ""},
+                    title="New vs. Returning Buyers — % of buyers per period",
+                    custom_data=["productName"],
+                )
+                _fig_ret.update_yaxes(range=[0, 105], ticksuffix="%")
+                _fig_ret.update_xaxes(tickangle=45)
+                _fig_ret.update_layout(
+                    height=420 if len(_sel_ret_prods) <= 2 else 620,
+                    margin=dict(l=0, r=0, t=50, b=60),
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1
+                    ),
+                )
+                _fig_ret.for_each_annotation(
+                    lambda a: a.update(text=a.text.split("=")[-1])
+                )
+                st.plotly_chart(_fig_ret, use_container_width=True)
+
         # ── Product drill-down ─────────────────────────────────────────────────
         st.markdown('<p class="section-header">Product Detail by Producer</p>', unsafe_allow_html=True)
         selected_producer_detail = st.selectbox(
