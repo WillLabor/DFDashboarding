@@ -1410,18 +1410,18 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             .agg(**{trend_col: (trend_col, "sum")})
             .reset_index()
         )
-        producer_trends["Period Label"] = producer_trends["periodStart"].dt.strftime('%Y-%m-%d')
 
         fig_producer = px.line(
             producer_trends,
-            x="Period Label",
+            x="periodStart",
             y=trend_col,
             color="producerName",
             markers=True,
             template="plotly_dark" if dark else "plotly_white",
-            labels={"Period Label": "Period", trend_col: selected_trend_label, "producerName": "Producer"},
+            labels={"periodStart": "Period", trend_col: selected_trend_label, "producerName": "Producer"},
             title=f"{selected_trend_label} by Producer Over Time",
         )
+        fig_producer.update_xaxes(tickformat="%m/%d/%y")
         fig_producer.update_traces(line=dict(width=2.5), marker=dict(size=7))
         fig_producer.update_layout(
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -1430,6 +1430,77 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             height=420,
         )
         st.plotly_chart(fig_producer, use_container_width=True)
+
+        # ── Period Comparisons (WoW / MoM / YoY) ─────────────────────────────
+        st.markdown('<p class="section-header">Period Comparisons</p>', unsafe_allow_html=True)
+
+        _prod_numeric_metrics = ["Total Units"]
+        if has_revenue:
+            _prod_numeric_metrics.append("Revenue ($)")
+        if has_revenue and has_cost:
+            _prod_numeric_metrics.append("Margin ($)")
+
+        _comp_agg: dict = {"qty": "sum"}
+        if has_revenue:
+            _comp_agg["customerPriceExt"] = "sum"
+        if has_revenue and has_cost:
+            _comp_agg["margin"] = "sum"
+
+        _comp_base = (
+            filtered_products.groupby("periodStart")
+            .agg(**{k: (k, v) for k, v in _comp_agg.items()})
+            .reset_index()
+            .rename(columns={
+                "qty": "Total Units",
+                "customerPriceExt": "Revenue ($)",
+                "margin": "Margin ($)",
+            })
+        )
+        _comp_base = _comp_base.set_index("periodStart")
+        _comp_base.index = pd.to_datetime(_comp_base.index)
+
+        def _prod_build_comparison(freq):
+            resampled = _comp_base.resample(freq).sum()
+            pct = resampled.pct_change() * 100
+            return resampled, pct
+
+        def _prod_render_comparison(raw, pct, suffix):
+            sel = st.selectbox("Metric", _prod_numeric_metrics, key=f"prod_cmp_{suffix}")
+            col_a, col_b = st.columns([2, 1])
+            with col_a:
+                _fig_cmp = go.Figure()
+                _fig_cmp.add_trace(go.Bar(
+                    x=raw.index.strftime('%m/%d/%y'),
+                    y=raw[sel],
+                    marker_color="#4a7c3f",
+                    name=sel,
+                ))
+                _fig_cmp.update_layout(
+                    template="plotly_dark" if dark else "plotly_white",
+                    height=300,
+                    margin=dict(l=0, r=0, t=20, b=0),
+                    hovermode="x",
+                )
+                st.plotly_chart(_fig_cmp, use_container_width=True)
+            with col_b:
+                _pct_disp = pct[[sel]].copy()
+                _pct_disp.index = _pct_disp.index.strftime('%m/%d/%y')
+                _pct_disp.columns = ["% Change"]
+                _pct_disp["% Change"] = _pct_disp["% Change"].apply(
+                    lambda x: f"{x:+.1f}%" if pd.notna(x) else "—"
+                )
+                st.dataframe(_pct_disp, use_container_width=True)
+
+        _ptab1, _ptab2, _ptab3 = st.tabs(["📅 Week-over-Week", "🗓 Month-over-Month", "📆 Year-over-Year"])
+        with _ptab1:
+            _raw, _pct = _prod_build_comparison("W")
+            _prod_render_comparison(_raw, _pct, "wow")
+        with _ptab2:
+            _raw, _pct = _prod_build_comparison("ME")
+            _prod_render_comparison(_raw, _pct, "mom")
+        with _ptab3:
+            _raw, _pct = _prod_build_comparison("YE")
+            _prod_render_comparison(_raw, _pct, "yoy")
 
         # ── Product Buyer Retention ────────────────────────────────────────────
         st.markdown('<p class="section-header">Product Buyer Retention</p>', unsafe_allow_html=True)
@@ -1625,7 +1696,6 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                 .agg(**{trend_col: (trend_col, "sum")})
                 .reset_index()
             )
-            product_trends_df["Period Label"] = product_trends_df["periodStart"].dt.strftime('%Y-%m-%d')
 
             # Top 10 products by selected metric
             top_products = (
@@ -1638,14 +1708,15 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
 
             fig_product = px.line(
                 product_trends_top,
-                x="Period Label",
+                x="periodStart",
                 y=trend_col,
                 color="productName",
                 markers=True,
                 template="plotly_dark" if dark else "plotly_white",
-                labels={"Period Label": "Period", trend_col: selected_trend_label},
+                labels={"periodStart": "Period", trend_col: selected_trend_label},
                 title=f"Top 10 Products — {selected_producer_detail} — {selected_trend_label}",
             )
+            fig_product.update_xaxes(tickformat="%m/%d/%y")
             fig_product.update_traces(line=dict(width=2.5), marker=dict(size=7))
             fig_product.update_layout(
                 legend=dict(orientation="v", yanchor="top", y=0.99, xanchor="right", x=0.99),
