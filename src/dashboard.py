@@ -59,14 +59,12 @@ def _compute_date_range(
     if last_days is None:
         return None, None
 
-    from datetime import datetime, timedelta, UTC
+    from datetime import datetime, timedelta, time, UTC
 
-    now = datetime.now(UTC)
-    start = now - timedelta(days=last_days)
-    # Make naive for comparison with data
-    start = start.replace(tzinfo=None)
-    now = now.replace(tzinfo=None)
-    return start.isoformat(), now.isoformat()
+    today = datetime.now(UTC).date()
+    end = datetime.combine(today, time(23, 59, 59))
+    start = datetime.combine(today - timedelta(days=last_days), time(0, 0, 0))
+    return start.isoformat(), end.isoformat()
 
 
 @st.cache_data(show_spinner=False)
@@ -263,8 +261,8 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         _start_date_sel = date_range[0] if isinstance(date_range, (list, tuple)) else date_range
         _end_date_sel = _default_end
 
-    start_date_str = _start_date_sel.isoformat()
-    end_date_str = _end_date_sel.isoformat()
+    start_date_str = _start_date_sel.isoformat() + "T00:00:00"
+    end_date_str = _end_date_sel.isoformat() + "T23:59:59"
 
     if st.sidebar.button("🔄 Fetch Orders", use_container_width=True):
         with st.spinner("Fetching from API…"):
