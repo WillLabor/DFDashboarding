@@ -733,7 +733,6 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         st.markdown('<p class="section-header">Metrics by Period & Customer Type</p>', unsafe_allow_html=True)
 
         grid_df = metrics_df.copy()
-        grid_df["Period Start"] = grid_df["Period Start"].dt.strftime('%m/%d/%y')
         grid_df["Revenue"] = grid_df["Revenue"].round(2)
         grid_df["AOV"] = grid_df["AOV"].round(2)
         grid_df["% Orders >$100"] = grid_df["% Orders >$100"].round(1)
@@ -747,6 +746,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             use_container_width=True,
             height=400,
             column_config={
+                "Period Start": st.column_config.DateColumn(format="MM/DD/YY"),
                 "Revenue": st.column_config.NumberColumn(format="$%.2f"),
                 "AOV": st.column_config.NumberColumn(format="$%.2f"),
                 "% Orders >$100": st.column_config.NumberColumn(format="%.1f%%"),
@@ -761,17 +761,17 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
 
         chart_data = metrics_df.copy()
         chart_data["Avg Weeks *"] = pd.to_numeric(chart_data["Avg Weeks *"], errors="coerce")
-        chart_data["Period Label"] = chart_data["Period Start"].dt.strftime('%m/%d/%y')
 
         fig = px.line(
             chart_data,
-            x="Period Label",
+            x="Period Start",
             y=chart_metric,
             color="Customer Type",
             markers=True,
             template="plotly_dark" if dark else "plotly_white",
-            labels={"Period Label": "Period Start", chart_metric: chart_metric},
+            labels={"Period Start": "Period Start", chart_metric: chart_metric},
         )
+        fig.update_xaxes(tickformat="%m/%d/%y")
         fig.update_traces(line=dict(width=2.5), marker=dict(size=7))
         fig.update_layout(
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
