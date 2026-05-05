@@ -694,7 +694,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             num_new_customers = sum(1 for e in filtered_emails if customer_first_order.get(e) in selected_periods)
             recurring_count = sum(
                 1 for e in filtered_emails
-                if any(p < min(selected_periods) for p in customer_all_periods.get(e, set()))
+                if len(customer_all_periods.get(e, set())) > 1
             )
             total_custs = len(filtered_emails)
             recurring_pct = recurring_count / total_custs * 100 if total_custs else 0
