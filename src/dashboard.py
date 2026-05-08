@@ -1912,7 +1912,33 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             st.dataframe(avail.head(50))
             return
 
+        def _clean_label_part(value: object) -> str:
+            if value is None or pd.isna(value):
+                return ""
+            return str(value).strip()
+
+        def _build_availability_product_label(row: pd.Series) -> str:
+            product_name = _clean_label_part(row.get("productName")) or "Unknown product"
+            detail_parts: list[str] = []
+
+            unit_name = _clean_label_part(row.get("unitName"))
+            if unit_name and unit_name.lower() != product_name.lower():
+                detail_parts.append(unit_name)
+
+            if not detail_parts:
+                unit_volume = row.get("unitVolume")
+                if pd.notna(unit_volume):
+                    detail_parts.append(f"{unit_volume:g} oz")
+
+            if not detail_parts:
+                unit_weight = row.get("unitWeight")
+                if pd.notna(unit_weight):
+                    detail_parts.append(f"{unit_weight:g} lb")
+
+            return f"{product_name} ({' | '.join(detail_parts)})" if detail_parts else product_name
+
         avail[producer_col] = avail[producer_col].fillna("Unknown").str.strip()
+        avail["productDisplayName"] = avail.apply(_build_availability_product_label, axis=1)
         all_avail_producers = sorted(avail[producer_col].dropna().unique())
         all_avail_periods = sorted(avail["periodStart"].dropna().unique())
 
@@ -1974,13 +2000,13 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
 
         # --- Summary table per producer ---
         st.markdown('<p class="section-header">Availability Summary by Producer</p>', unsafe_allow_html=True)
-        agg_dict = {"productName": "nunique"}
+        agg_dict = {"productDisplayName": "nunique"}
         for c in ["quantityListed", "quantityAvailable", "quantitySold"]:
             if c in filtered_avail.columns:
                 agg_dict[c] = "sum"
         avail_summary = (
             filtered_avail.groupby(producer_col)
-            .agg(**{("num_products" if k == "productName" else k): (k, v) for k, v in agg_dict.items()})
+            .agg(**{("num_products" if k == "productDisplayName" else k): (k, v) for k, v in agg_dict.items()})
             .reset_index()
             .sort_values("quantitySold" if "quantitySold" in agg_dict else producer_col, ascending=False)
             .round(1)
@@ -1994,14 +2020,15 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         )
         if sel_avail_producer_detail:
             prod_detail = filtered_avail[filtered_avail[producer_col] == sel_avail_producer_detail]
-            detail_agg = {k: v for k, v in agg_dict.items() if k != "productName"}
+            detail_agg = {k: v for k, v in agg_dict.items() if k != "productDisplayName"}
             if detail_agg:
                 prod_table = (
-                    prod_detail.groupby("productName")
+                    prod_detail.groupby("productDisplayName")
                     .agg(**{c: (c, "sum") for c in detail_agg})
                     .reset_index()
                     .sort_values(list(detail_agg.keys())[0], ascending=False)
                     .round(1)
+                    .rename(columns={"productDisplayName": "Product"})
                 )
                 st.dataframe(prod_table, use_container_width=True, height=350)
 
