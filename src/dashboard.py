@@ -413,11 +413,23 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
     }
     VIEW_KEYS = list(VIEW_LABELS.keys())
     VIEW_DISPLAY = [VIEW_LABELS[k] for k in VIEW_KEYS]
+    VIEW_DISPLAY_TO_KEY = {VIEW_LABELS[k]: k for k in VIEW_KEYS}
 
     # Default view index
     default_view_index = 1 if has_orders else (2 if has_customers else 0)
     if "selected_view" not in st.session_state:
         st.session_state.selected_view = VIEW_KEYS[default_view_index]
+
+    st.sidebar.markdown("---")
+    selected_view_label = st.sidebar.selectbox(
+        "View",
+        options=VIEW_DISPLAY,
+        index=VIEW_KEYS.index(st.session_state.selected_view),
+        key="selected_view_label",
+    )
+    selected_view_key = VIEW_DISPLAY_TO_KEY[selected_view_label]
+    if st.session_state.selected_view != selected_view_key:
+        st.session_state.selected_view = selected_view_key
 
     # Pill-style tab row
     st.markdown("""
