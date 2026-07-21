@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_loader import fetch_api_to_df, fetch_price_levels, fetch_availability_to_df, fetch_customers_from_api
-from src.order_analysis import average_order_value_by_type_period, build_product_reorder_plan, calculate_clv
+from src.order_analysis import average_order_value_by_type_period, build_product_reorder_plan, calculate_clv, parse_painterland_unit
 from src.ml_experiments import run_customer_ml
 
 DEFAULT_BASE_URL = "https://data.localfoodmarketplace.com"
@@ -886,16 +886,18 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                 ].copy()
                 if not avail_yogurt.empty:
                     avail_yogurt["unitName"] = avail_yogurt.get("unitName", pd.Series("", index=avail_yogurt.index)).fillna("")
-                    avail_yogurt["display_sku"] = np.where(
-                        avail_yogurt["unitName"].astype(str).str.strip().ne(""),
-                        avail_yogurt["productName"].astype(str).str.strip() + " - " + avail_yogurt["unitName"].astype(str).str.strip(),
-                        avail_yogurt["productName"].astype(str).str.strip(),
-                    )
+                    avail_unit_info = avail_yogurt["unitName"].apply(parse_painterland_unit).apply(pd.Series)
+                    avail_yogurt = pd.concat([avail_yogurt, avail_unit_info], axis=1)
                     inventory_col = next((c for c in ["quantityAvailable", "quantityListed"] if c in avail_yogurt.columns), None)
                     if inventory_col is not None:
                         avail_yogurt[inventory_col] = pd.to_numeric(avail_yogurt[inventory_col], errors="coerce").fillna(0)
+                        avail_yogurt["inventory_case_equiv"] = np.where(
+                            avail_yogurt["is_case_sale"],
+                            avail_yogurt[inventory_col],
+                            avail_yogurt[inventory_col] / avail_yogurt["pack_size"],
+                        )
                         inventory_map = (
-                            avail_yogurt.groupby("display_sku")[inventory_col]
+                            avail_yogurt.groupby("order_sku")["inventory_case_equiv"]
                             .sum()
                             .to_dict()
                         )
@@ -999,9 +1001,11 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         latest_cycle = selected_cycle_dates[-1]
         prior_cycle = selected_cycle_dates[-2] if len(selected_cycle_dates) > 1 else None
 
-        recent_units = float(cycle_summary["total_qty"].iloc[-1]) if not cycle_summary.empty else 0.0
-        avg_units = float(cycle_summary["total_qty"].mean()) if not cycle_summary.empty else 0.0
-        trend_units = float(cycle_summary["total_qty"].tail(min(3, len(cycle_summary))).mean()) if not cycle_summary.empty else 0.0
+        recent_case_equiv = float(cycle_summary["total_case_equiv"].iloc[-1]) if not cycle_summary.empty else 0.0
+        avg_case_equiv = float(cycle_summary["total_case_equiv"].mean()) if not cycle_summary.empty else 0.0
+        trend_case_equiv = float(cycle_summary["total_case_equiv"].tail(min(3, len(cycle_summary))).mean()) if not cycle_summary.empty else 0.0
+        current_cycle_cases = float(cycle_summary["total_cases_sold"].iloc[-1]) if not cycle_summary.empty else 0.0
+        current_cycle_split_units = float(cycle_summary["total_split_units"].iloc[-1]) if not cycle_summary.empty else 0.0
         recommended_units = int(sku_plan["recommended_qty"].sum()) if not sku_plan.empty else 0
         active_customers = int(cycle_summary["active_customers"].iloc[-1]) if not cycle_summary.empty else 0
         inventory_units = float(sku_plan["inventory_available"].sum()) if "inventory_available" in sku_plan.columns else 0.0
@@ -1014,27 +1018,31 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             icon=None,
         )
         if inventory_loaded:
-            st.caption("Inventory adjustment is active using the loaded Availability dataset.")
+            st.caption("Inventory adjustment is active using the loaded Availability dataset, converted to case equivalents.")
         else:
-            st.caption("Inventory adjustment is off because Painterland availability data has not been loaded yet. Fetch Availability first if you want on-hand units netted out.")
+            st.caption("Inventory adjustment is off because Painterland availability data has not been loaded yet. Fetch Availability first if you want on-hand inventory netted out in cases.")
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Last 2-Week Demand", f"{recent_units:,.1f} units")
-        k2.metric("Avg 2-Week Demand", f"{avg_units:,.1f} units")
-        k3.metric("Current Cycle Ordered", f"{recent_units:,.1f} units")
+        k1.metric("Last 2-Week Demand", f"{recent_case_equiv:,.2f} cases")
+        k2.metric("Avg 2-Week Demand", f"{avg_case_equiv:,.2f} cases")
+        k3.metric("Current Cycle Cases Sold", f"{current_cycle_cases:,.0f}")
         k4.metric("Active Yogurt Customers", f"{active_customers:,}")
 
         k5, k6, k7, k8 = st.columns(4)
         wholesale_units = float(filtered_yogurt.loc[filtered_yogurt["customerType"].astype(str).str.upper() == "WHOLESALE", "qty"].sum())
         retail_units = float(filtered_yogurt.loc[filtered_yogurt["customerType"].astype(str).str.upper() == "RETAIL", "qty"].sum())
-        k5.metric("On-Hand Inventory", f"{inventory_units:,.1f} units")
-        k6.metric("Next Cycle Order Need", f"{first_cycle_order_need:,} units")
-        k7.metric("Wholesale Units", f"{wholesale_units:,.1f}")
-        k8.metric("Retail Units", f"{retail_units:,.1f}")
+        k5.metric("Current Split Units Sold", f"{current_cycle_split_units:,.0f}")
+        k6.metric("On-Hand Inventory", f"{inventory_units:,.2f} cases")
+        k7.metric("Next Cycle Order Need", f"{first_cycle_order_need:,} cases")
+        k8.metric("Wholesale Raw Units", f"{wholesale_units:,.1f}")
 
         k9, k10, _, _ = st.columns(4)
-        k9.metric("Trend Baseline", f"{trend_units:,.1f} units")
-        k10.metric("Manual Uplift", f"{manual_uplift_units:,.1f} units")
+        k9.metric("Trend Baseline", f"{trend_case_equiv:,.2f} cases")
+        k10.metric("Retail Raw Units", f"{retail_units:,.1f}")
+
+        k11, k12, _, _ = st.columns(4)
+        k11.metric("Suggested Next Order", f"{recommended_units:,} cases")
+        k12.metric("Manual Uplift", f"{manual_uplift_units:,.1f} cases")
 
         st.markdown('<p class="section-header">Demand by Order Cycle</p>', unsafe_allow_html=True)
         cycle_chart = cycle_summary.copy()
@@ -1043,9 +1051,9 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         fig_cycle.add_trace(
             go.Scatter(
                 x=cycle_chart["period_label"],
-                y=cycle_chart["total_qty"],
+                y=cycle_chart["total_case_equiv"],
                 mode="lines+markers",
-                name="Units",
+                name="Case-equiv demand",
                 line=dict(color="#4a7c3f", width=3),
                 marker=dict(size=8),
             )
@@ -1055,10 +1063,30 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             height=340,
             margin=dict(l=0, r=0, t=20, b=0),
             xaxis_title="Cycle start",
-            yaxis_title="Units ordered",
+            yaxis_title="Cases needed",
             hovermode="x unified",
         )
         st.plotly_chart(fig_cycle, use_container_width=True)
+
+        st.markdown('<p class="section-header">Current Cycle Grounding by Order SKU</p>', unsafe_allow_html=True)
+        current_cycle_sku = sku_plan[[
+            "display_sku", "latest_case_sales", "latest_split_units", "recent_case_equiv", "pack_size",
+        ]].copy()
+        current_cycle_sku = current_cycle_sku.rename(columns={
+            "display_sku": "Order SKU",
+            "latest_case_sales": "Cases Sold in Current Cycle",
+            "latest_split_units": "Split Units Sold in Current Cycle",
+            "recent_case_equiv": "Current Cycle Case-Equivalent",
+            "pack_size": "Units per Case",
+        })
+        st.dataframe(
+            current_cycle_sku,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Current Cycle Case-Equivalent": st.column_config.NumberColumn(format="%.3f"),
+            },
+        )
 
         st.markdown('<p class="section-header">Next 6 Weeks Forecast by Cycle</p>', unsafe_allow_html=True)
         if not forecast_summary.empty:
@@ -1098,19 +1126,21 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
 
         st.markdown('<p class="section-header">Recommended Next Order by SKU</p>', unsafe_allow_html=True)
         sku_display = sku_plan[[
-            "display_sku", "recent_qty", "prior_qty", "avg_cycle_qty", "trend_cycle_qty",
+            "display_sku", "latest_case_sales", "latest_split_units", "recent_case_equiv", "prior_case_equiv", "avg_cycle_cases", "trend_cycle_cases",
             "inventory_available", "manual_uplift_units", "recommended_qty", "delta_vs_recent", "active_cycles",
         ]].copy()
         sku_display = sku_display.rename(columns={
             "display_sku": "SKU",
-            "recent_qty": f"Latest Cycle ({latest_cycle.strftime('%m/%d')})",
-            "prior_qty": f"Prior Cycle ({prior_cycle.strftime('%m/%d')})" if prior_cycle is not None else "Prior Cycle",
-            "avg_cycle_qty": "Avg / Cycle",
-            "trend_cycle_qty": "Trend / Cycle",
+            "latest_case_sales": "Cases Sold",
+            "latest_split_units": "Split Units Sold",
+            "recent_case_equiv": f"Latest Cycle Cases ({latest_cycle.strftime('%m/%d')})",
+            "prior_case_equiv": f"Prior Cycle Cases ({prior_cycle.strftime('%m/%d')})" if prior_cycle is not None else "Prior Cycle Cases",
+            "avg_cycle_cases": "Avg Cases / Cycle",
+            "trend_cycle_cases": "Trend Cases / Cycle",
             "inventory_available": "Inventory On Hand",
             "manual_uplift_units": "Manual Uplift",
             "recommended_qty": "Recommended Next Order",
-            "delta_vs_recent": "Delta vs Latest",
+            "delta_vs_recent": "Delta vs Latest Cases",
             "active_cycles": "Cycles Ordered",
         })
         st.dataframe(
@@ -1118,12 +1148,14 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Avg / Cycle": st.column_config.NumberColumn(format="%.1f"),
-                "Trend / Cycle": st.column_config.NumberColumn(format="%.1f"),
-                "Inventory On Hand": st.column_config.NumberColumn(format="%.1f"),
-                "Manual Uplift": st.column_config.NumberColumn(format="%.1f"),
+                f"Latest Cycle Cases ({latest_cycle.strftime('%m/%d')})": st.column_config.NumberColumn(format="%.3f"),
+                f"Prior Cycle Cases ({prior_cycle.strftime('%m/%d')})" if prior_cycle is not None else "Prior Cycle Cases": st.column_config.NumberColumn(format="%.3f"),
+                "Avg Cases / Cycle": st.column_config.NumberColumn(format="%.3f"),
+                "Trend Cases / Cycle": st.column_config.NumberColumn(format="%.3f"),
+                "Inventory On Hand": st.column_config.NumberColumn(format="%.3f"),
+                "Manual Uplift": st.column_config.NumberColumn(format="%.3f"),
                 "Recommended Next Order": st.column_config.NumberColumn(format="%d"),
-                "Delta vs Latest": st.column_config.NumberColumn(format="%.1f"),
+                "Delta vs Latest Cases": st.column_config.NumberColumn(format="%.3f"),
             },
         )
 
@@ -1174,23 +1206,27 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             "customerType": "Type",
             "locationName": "Location",
             "organization": "Organization",
-            "total_qty": "Units",
+            "total_case_equiv": "Cases Equivalent",
+            "cases_sold": "Cases Sold",
+            "split_units_sold": "Split Units Sold",
             "total_revenue": "Revenue",
             "cycles_ordered": "Cycles",
-            "latest_cycle_qty": "Latest Cycle Units",
-            "prior_cycle_qty": "Prior Cycle Units",
-            "change_vs_prior_cycle": "Change vs Prior",
+            "latest_cycle_case_equiv": "Latest Cycle Cases",
+            "prior_cycle_case_equiv": "Prior Cycle Cases",
+            "change_vs_prior_cycle": "Change vs Prior Cases",
         })
         st.dataframe(
             customer_display,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Units": st.column_config.NumberColumn(format="%.1f"),
+                "Cases Equivalent": st.column_config.NumberColumn(format="%.3f"),
+                "Cases Sold": st.column_config.NumberColumn(format="%.1f"),
+                "Split Units Sold": st.column_config.NumberColumn(format="%.1f"),
                 "Revenue": st.column_config.NumberColumn(format="$%.2f"),
-                "Latest Cycle Units": st.column_config.NumberColumn(format="%.1f"),
-                "Prior Cycle Units": st.column_config.NumberColumn(format="%.1f"),
-                "Change vs Prior": st.column_config.NumberColumn(format="%.1f"),
+                "Latest Cycle Cases": st.column_config.NumberColumn(format="%.3f"),
+                "Prior Cycle Cases": st.column_config.NumberColumn(format="%.3f"),
+                "Change vs Prior Cases": st.column_config.NumberColumn(format="%.3f"),
             },
         )
 

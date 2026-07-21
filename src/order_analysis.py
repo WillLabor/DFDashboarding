@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -261,6 +262,52 @@ def calculate_clv(seg_df: pd.DataFrame, projection_months: int = 12) -> pd.DataF
     return df
 
 
+_YOGURT_FLAVOR_PATTERNS: list[tuple[str, str]] = [
+    ("blueberry lemon", "Blueberry Lemon"),
+    ("meadow berry", "Meadowberry"),
+    ("meadowberry", "Meadowberry"),
+    ("passion fruit", "Passion Fruit"),
+    ("savannah peach", "Savannah Peach"),
+    ("strawberry", "Strawberry"),
+    ("vanilla bean", "Vanilla Bean"),
+    ("wilder raspberry", "Raspberry"),
+    ("raspberry", "Raspberry"),
+    ("plain", "Plain"),
+]
+
+
+def parse_painterland_unit(unit_name: object) -> dict[str, object]:
+    """Normalize a Painterland selling unit into an orderable case SKU.
+
+    Returns case-pack metadata so mixed sales of cases and split singles can be
+    rolled up to the same SKU for ordering.
+    """
+
+    raw_label = "" if unit_name is None or pd.isna(unit_name) else str(unit_name).strip()
+    normalized = re.sub(r"\s+", " ", raw_label).lower()
+
+    flavor = "Unknown"
+    for pattern, label in _YOGURT_FLAVOR_PATTERNS:
+        if pattern in normalized:
+            flavor = label
+            break
+
+    is_24oz = "24 oz" in normalized or "24oz" in normalized
+    pack_size = 6 if is_24oz else 8
+    size_label = "24oz" if is_24oz else "5.3oz"
+    is_case_sale = "case" in normalized
+    order_sku = f"{flavor} {size_label} case"
+
+    return {
+        "order_sku": order_sku,
+        "flavor": flavor,
+        "size_label": size_label,
+        "pack_size": pack_size,
+        "is_case_sale": is_case_sale,
+        "normalized_unit_name": raw_label or order_sku,
+    }
+
+
 def build_product_reorder_plan(
     df: pd.DataFrame,
     producer_name: str,
@@ -319,15 +366,17 @@ def build_product_reorder_plan(
     filtered["organization"] = filtered.get("organization", pd.Series("", index=filtered.index)).fillna("")
     filtered["unitName"] = filtered.get("unitName", pd.Series("", index=filtered.index)).fillna("")
 
-    filtered["display_sku"] = np.where(
-        filtered["unitName"].str.strip().ne(""),
-        filtered["productName"].astype(str).str.strip() + " - " + filtered["unitName"].astype(str).str.strip(),
-        filtered["productName"].astype(str).str.strip(),
+    unit_info = filtered["unitName"].apply(parse_painterland_unit).apply(pd.Series)
+    filtered = pd.concat([filtered, unit_info], axis=1)
+    filtered["display_sku"] = filtered["order_sku"]
+    filtered["sku_key"] = filtered["order_sku"]
+    filtered["case_equiv_qty"] = np.where(
+        filtered["is_case_sale"],
+        filtered["qty"],
+        filtered["qty"] / filtered["pack_size"],
     )
-    if "unitId" in filtered.columns:
-        filtered["sku_key"] = filtered["unitId"].astype(str)
-    else:
-        filtered["sku_key"] = filtered["display_sku"].astype(str)
+    filtered["case_sale_qty"] = np.where(filtered["is_case_sale"], filtered["qty"], 0.0)
+    filtered["split_unit_qty"] = np.where(filtered["is_case_sale"], 0.0, filtered["qty"])
 
     available_cycles = sorted(filtered["periodStart"].dropna().unique())
     selected_cycles = available_cycles[-max(1, lookback_cycles):]
@@ -336,7 +385,9 @@ def build_product_reorder_plan(
     cycle_summary = (
         scoped.groupby("periodStart", as_index=False)
         .agg(
-            total_qty=("qty", "sum"),
+            total_case_equiv=("case_equiv_qty", "sum"),
+            total_cases_sold=("case_sale_qty", "sum"),
+            total_split_units=("split_unit_qty", "sum"),
             active_customers=("customerName", "nunique"),
             revenue=("customerPriceExt", "sum"),
         )
@@ -347,7 +398,7 @@ def build_product_reorder_plan(
         scoped.pivot_table(
             index="periodStart",
             columns="sku_key",
-            values="qty",
+            values="case_equiv_qty",
             aggfunc="sum",
             fill_value=0,
         )
@@ -363,6 +414,9 @@ def build_product_reorder_plan(
             productName=("productName", "last"),
             unitName=("unitName", "last"),
             producerName=("producerName", "last"),
+            pack_size=("pack_size", "last"),
+            size_label=("size_label", "last"),
+            flavor=("flavor", "last"),
         )
     )
 
@@ -383,15 +437,33 @@ def build_product_reorder_plan(
         trend_cycle_qty = float(series.tail(min(3, len(series))).mean()) if len(series) else 0.0
         baseline_qty = max(recent_qty, avg_cycle_qty, trend_cycle_qty)
         baseline_total += baseline_qty
+
+        latest_case_sales = float(
+            scoped.loc[(scoped["sku_key"] == sku_key) & (scoped["periodStart"] == selected_cycles[-1]), "case_sale_qty"].sum()
+        ) if selected_cycles else 0.0
+        latest_split_units = float(
+            scoped.loc[(scoped["sku_key"] == sku_key) & (scoped["periodStart"] == selected_cycles[-1]), "split_unit_qty"].sum()
+        ) if selected_cycles else 0.0
+        prior_case_sales = float(
+            scoped.loc[(scoped["sku_key"] == sku_key) & (scoped["periodStart"] == selected_cycles[-2]), "case_sale_qty"].sum()
+        ) if len(selected_cycles) > 1 else 0.0
+        prior_split_units = float(
+            scoped.loc[(scoped["sku_key"] == sku_key) & (scoped["periodStart"] == selected_cycles[-2]), "split_unit_qty"].sum()
+        ) if len(selected_cycles) > 1 else 0.0
+
         sku_rows.append(
             {
                 "sku_key": sku_key,
-                "recent_qty": recent_qty,
-                "prior_qty": prior_qty,
-                "avg_cycle_qty": avg_cycle_qty,
-                "trend_cycle_qty": trend_cycle_qty,
+                "recent_case_equiv": recent_qty,
+                "prior_case_equiv": prior_qty,
+                "avg_cycle_cases": avg_cycle_qty,
+                "trend_cycle_cases": trend_cycle_qty,
                 "baseline_qty": baseline_qty,
                 "active_cycles": int((series > 0).sum()),
+                "latest_case_sales": latest_case_sales,
+                "latest_split_units": latest_split_units,
+                "prior_case_sales": prior_case_sales,
+                "prior_split_units": prior_split_units,
             }
         )
 
@@ -415,8 +487,8 @@ def build_product_reorder_plan(
             lambda row: math.ceil(max(0.0, row["baseline_qty"] * (1 + growth_buffer_pct / 100.0) + row["manual_uplift_units"])),
             axis=1,
         )
-        sku_plan["delta_vs_recent"] = sku_plan["recommended_qty"] - sku_plan["recent_qty"]
-        sku_plan = sku_plan.sort_values(["recommended_qty", "recent_qty", "display_sku"], ascending=[False, False, True])
+        sku_plan["delta_vs_recent"] = sku_plan["recommended_qty"] - sku_plan["recent_case_equiv"]
+        sku_plan = sku_plan.sort_values(["recommended_qty", "recent_case_equiv", "display_sku"], ascending=[False, False, True])
 
     forecast_rows: list[dict[str, object]] = []
     latest_cycle = selected_cycles[-1]
@@ -425,7 +497,7 @@ def build_product_reorder_plan(
     for _, row in sku_plan.iterrows():
         available_inventory = float(row.get("inventory_available", 0.0))
         cycle_projection = max(0.0, float(row.get("baseline_qty", 0.0)) * (1 + growth_buffer_pct / 100.0) + float(row.get("manual_uplift_units", 0.0)))
-        step_change = max(0.0, float(row.get("recent_qty", 0.0)) - float(row.get("prior_qty", 0.0)))
+        step_change = max(0.0, float(row.get("recent_case_equiv", 0.0)) - float(row.get("prior_case_equiv", 0.0)))
         for bucket_idx, cycle_start in enumerate(future_cycle_starts, start=1):
             projected_demand = max(0.0, cycle_projection + (step_change * 0.35 * (bucket_idx - 1)))
             inventory_applied = min(available_inventory, projected_demand)
@@ -461,35 +533,37 @@ def build_product_reorder_plan(
     customer_summary = (
         scoped.groupby(["customerName", "customerType", "locationName", "organization"], dropna=False, as_index=False)
         .agg(
-            total_qty=("qty", "sum"),
+            total_case_equiv=("case_equiv_qty", "sum"),
+            cases_sold=("case_sale_qty", "sum"),
+            split_units_sold=("split_unit_qty", "sum"),
             total_revenue=("customerPriceExt", "sum"),
             cycles_ordered=("periodStart", "nunique"),
         )
-        .sort_values(["total_qty", "total_revenue", "customerName"], ascending=[False, False, True])
+        .sort_values(["total_case_equiv", "total_revenue", "customerName"], ascending=[False, False, True])
     )
 
     if len(selected_cycles) >= 1:
         latest_cycle = selected_cycles[-1]
         latest_customer_qty = (
             scoped[scoped["periodStart"] == latest_cycle]
-            .groupby("customerName")["qty"]
+            .groupby("customerName")["case_equiv_qty"]
             .sum()
-            .rename("latest_cycle_qty")
+            .rename("latest_cycle_case_equiv")
         )
         customer_summary = customer_summary.merge(latest_customer_qty, on="customerName", how="left")
     if len(selected_cycles) >= 2:
         prior_cycle = selected_cycles[-2]
         prior_customer_qty = (
             scoped[scoped["periodStart"] == prior_cycle]
-            .groupby("customerName")["qty"]
+            .groupby("customerName")["case_equiv_qty"]
             .sum()
-            .rename("prior_cycle_qty")
+            .rename("prior_cycle_case_equiv")
         )
         customer_summary = customer_summary.merge(prior_customer_qty, on="customerName", how="left")
 
-    customer_summary["latest_cycle_qty"] = pd.to_numeric(customer_summary.get("latest_cycle_qty", 0), errors="coerce").fillna(0)
-    customer_summary["prior_cycle_qty"] = pd.to_numeric(customer_summary.get("prior_cycle_qty", 0), errors="coerce").fillna(0)
-    customer_summary["change_vs_prior_cycle"] = customer_summary["latest_cycle_qty"] - customer_summary["prior_cycle_qty"]
+    customer_summary["latest_cycle_case_equiv"] = pd.to_numeric(customer_summary.get("latest_cycle_case_equiv", 0), errors="coerce").fillna(0)
+    customer_summary["prior_cycle_case_equiv"] = pd.to_numeric(customer_summary.get("prior_cycle_case_equiv", 0), errors="coerce").fillna(0)
+    customer_summary["change_vs_prior_cycle"] = customer_summary["latest_cycle_case_equiv"] - customer_summary["prior_cycle_case_equiv"]
 
     return {
         "filtered": scoped,
