@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -258,6 +259,192 @@ def calculate_clv(seg_df: pd.DataFrame, projection_months: int = 12) -> pd.DataF
     )
 
     return df
+
+
+def build_product_reorder_plan(
+    df: pd.DataFrame,
+    producer_name: str,
+    product_keyword: str,
+    lookback_cycles: int = 6,
+    status_filter: str | None = "COMPLETE",
+    growth_buffer_pct: float = 0.0,
+    manual_uplift_units: float = 0.0,
+) -> dict[str, object]:
+    """Build a cycle-based reorder plan for a focused product family.
+
+    The plan uses the loaded order-item history and treats each ``periodStart``
+    value as one ordering cycle. Recommendations are based on the strongest of
+    recent demand, trailing average demand, and short-term trend demand.
+    """
+
+    required_cols = {"periodStart", "qty", "producerName", "productName"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(sorted(missing))}")
+
+    work_df = df.copy()
+    work_df["periodStart"] = pd.to_datetime(work_df["periodStart"], errors="coerce")
+    work_df["qty"] = pd.to_numeric(work_df["qty"], errors="coerce").fillna(0)
+    if "customerPriceExt" in work_df.columns:
+        work_df["customerPriceExt"] = pd.to_numeric(work_df["customerPriceExt"], errors="coerce").fillna(0)
+    else:
+        work_df["customerPriceExt"] = 0.0
+
+    producer_mask = work_df["producerName"].fillna("").str.contains(producer_name, case=False, regex=False)
+    product_mask = (
+        work_df["productName"].fillna("").str.contains(product_keyword, case=False, regex=False)
+        | work_df.get("subCategory", pd.Series("", index=work_df.index)).fillna("").str.contains(product_keyword, case=False, regex=False)
+    )
+    status_mask = pd.Series(True, index=work_df.index)
+    if status_filter and "orderStatus" in work_df.columns:
+        status_mask = work_df["orderStatus"].fillna("").eq(status_filter)
+
+    filtered = work_df[producer_mask & product_mask & status_mask].copy()
+    filtered = filtered[filtered["periodStart"].notna()].copy()
+
+    if filtered.empty:
+        return {
+            "filtered": filtered,
+            "cycles": pd.DataFrame(),
+            "sku_plan": pd.DataFrame(),
+            "customer_summary": pd.DataFrame(),
+            "cycle_count": 0,
+        }
+
+    filtered["customerName"] = filtered.get("customerName", pd.Series("Unknown", index=filtered.index)).fillna("Unknown")
+    filtered["customerType"] = filtered.get("customerType", pd.Series("Unknown", index=filtered.index)).fillna("Unknown")
+    filtered["locationName"] = filtered.get("locationName", pd.Series("", index=filtered.index)).fillna("")
+    filtered["organization"] = filtered.get("organization", pd.Series("", index=filtered.index)).fillna("")
+    filtered["unitName"] = filtered.get("unitName", pd.Series("", index=filtered.index)).fillna("")
+
+    filtered["sku_key"] = filtered.get("productId", pd.Series(filtered["productName"], index=filtered.index)).astype(str)
+    filtered["display_sku"] = np.where(
+        filtered["unitName"].str.strip().ne(""),
+        filtered["productName"].astype(str).str.strip() + " - " + filtered["unitName"].astype(str).str.strip(),
+        filtered["productName"].astype(str).str.strip(),
+    )
+
+    available_cycles = sorted(filtered["periodStart"].dropna().unique())
+    selected_cycles = available_cycles[-max(1, lookback_cycles):]
+    scoped = filtered[filtered["periodStart"].isin(selected_cycles)].copy()
+
+    cycle_summary = (
+        scoped.groupby("periodStart", as_index=False)
+        .agg(
+            total_qty=("qty", "sum"),
+            active_customers=("customerName", "nunique"),
+            revenue=("customerPriceExt", "sum"),
+        )
+        .sort_values("periodStart")
+    )
+
+    sku_pivot = (
+        scoped.pivot_table(
+            index="periodStart",
+            columns="sku_key",
+            values="qty",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reindex(selected_cycles, fill_value=0)
+        .sort_index()
+    )
+
+    sku_meta = (
+        scoped.sort_values("periodStart")
+        .groupby("sku_key", as_index=False)
+        .agg(
+            display_sku=("display_sku", "last"),
+            productName=("productName", "last"),
+            unitName=("unitName", "last"),
+            producerName=("producerName", "last"),
+        )
+    )
+
+    sku_rows: list[dict[str, object]] = []
+    baseline_total = 0.0
+    for sku_key in sku_pivot.columns:
+        series = sku_pivot[sku_key].astype(float)
+        recent_qty = float(series.iloc[-1]) if len(series) else 0.0
+        prior_qty = float(series.iloc[-2]) if len(series) > 1 else 0.0
+        avg_cycle_qty = float(series.mean()) if len(series) else 0.0
+        trend_cycle_qty = float(series.tail(min(3, len(series))).mean()) if len(series) else 0.0
+        baseline_qty = max(recent_qty, avg_cycle_qty, trend_cycle_qty)
+        baseline_total += baseline_qty
+        sku_rows.append(
+            {
+                "sku_key": sku_key,
+                "recent_qty": recent_qty,
+                "prior_qty": prior_qty,
+                "avg_cycle_qty": avg_cycle_qty,
+                "trend_cycle_qty": trend_cycle_qty,
+                "baseline_qty": baseline_qty,
+                "active_cycles": int((series > 0).sum()),
+            }
+        )
+
+    sku_plan = pd.DataFrame(sku_rows).merge(sku_meta, on="sku_key", how="left")
+    if sku_plan.empty:
+        sku_plan = pd.DataFrame(
+            columns=[
+                "display_sku", "recent_qty", "prior_qty", "avg_cycle_qty", "trend_cycle_qty",
+                "baseline_qty", "manual_uplift_units", "recommended_qty", "active_cycles",
+            ]
+        )
+    else:
+        if baseline_total > 0:
+            sku_plan["manual_uplift_units"] = manual_uplift_units * (sku_plan["baseline_qty"] / baseline_total)
+        else:
+            even_split = manual_uplift_units / len(sku_plan) if len(sku_plan) else 0.0
+            sku_plan["manual_uplift_units"] = even_split
+
+        sku_plan["recommended_qty"] = sku_plan.apply(
+            lambda row: math.ceil(max(0.0, row["baseline_qty"] * (1 + growth_buffer_pct / 100.0) + row["manual_uplift_units"])),
+            axis=1,
+        )
+        sku_plan["delta_vs_recent"] = sku_plan["recommended_qty"] - sku_plan["recent_qty"]
+        sku_plan = sku_plan.sort_values(["recommended_qty", "recent_qty", "display_sku"], ascending=[False, False, True])
+
+    customer_summary = (
+        scoped.groupby(["customerName", "customerType", "locationName", "organization"], dropna=False, as_index=False)
+        .agg(
+            total_qty=("qty", "sum"),
+            total_revenue=("customerPriceExt", "sum"),
+            cycles_ordered=("periodStart", "nunique"),
+        )
+        .sort_values(["total_qty", "total_revenue", "customerName"], ascending=[False, False, True])
+    )
+
+    if len(selected_cycles) >= 1:
+        latest_cycle = selected_cycles[-1]
+        latest_customer_qty = (
+            scoped[scoped["periodStart"] == latest_cycle]
+            .groupby("customerName")["qty"]
+            .sum()
+            .rename("latest_cycle_qty")
+        )
+        customer_summary = customer_summary.merge(latest_customer_qty, on="customerName", how="left")
+    if len(selected_cycles) >= 2:
+        prior_cycle = selected_cycles[-2]
+        prior_customer_qty = (
+            scoped[scoped["periodStart"] == prior_cycle]
+            .groupby("customerName")["qty"]
+            .sum()
+            .rename("prior_cycle_qty")
+        )
+        customer_summary = customer_summary.merge(prior_customer_qty, on="customerName", how="left")
+
+    customer_summary["latest_cycle_qty"] = pd.to_numeric(customer_summary.get("latest_cycle_qty", 0), errors="coerce").fillna(0)
+    customer_summary["prior_cycle_qty"] = pd.to_numeric(customer_summary.get("prior_cycle_qty", 0), errors="coerce").fillna(0)
+    customer_summary["change_vs_prior_cycle"] = customer_summary["latest_cycle_qty"] - customer_summary["prior_cycle_qty"]
+
+    return {
+        "filtered": scoped,
+        "cycles": cycle_summary,
+        "sku_plan": sku_plan,
+        "customer_summary": customer_summary,
+        "cycle_count": len(selected_cycles),
+    }
 
 
 def save_aggregation(df: pd.DataFrame, out_path: str) -> None:

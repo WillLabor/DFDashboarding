@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_loader import fetch_api_to_df, fetch_price_levels, fetch_availability_to_df, fetch_customers_from_api
-from src.order_analysis import average_order_value_by_type_period, calculate_clv
+from src.order_analysis import average_order_value_by_type_period, build_product_reorder_plan, calculate_clv
 from src.ml_experiments import run_customer_ml
 
 DEFAULT_BASE_URL = "https://data.localfoodmarketplace.com"
@@ -404,6 +404,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
     # ── View picker in the main area ─────────────────────────────────────────
     VIEW_LABELS = {
         "Order value analysis": "📊 Orders",
+        "Yogurt Ordering":     "🥣 Yogurt",
         "Customer Segments":    "👥 Segments",
         "Customer LTV":         "💰 LTV",
         "Product Trends":       "📦 Products",
@@ -838,6 +839,240 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             with comp_tab3:
                 raw_yoy, pct_yoy = _build_comparison(comp_df, "YE")
                 _render_comparison_tab(raw_yoy, pct_yoy, "Revenue", "yoy")
+
+    elif view == "Yogurt Ordering":
+        if df is None:
+            st.info("Fetch order data first from the API.")
+            return
+
+        st.title("🥣 Painterland Sisters Yogurt Ordering")
+        st.caption("Use recent Painterland Sisters yogurt demand to plan the next 2-week order cycle.")
+
+        required_yogurt_cols = {"periodStart", "qty", "producerName", "productName"}
+        if not required_yogurt_cols.issubset(set(df.columns)):
+            missing = required_yogurt_cols - set(df.columns)
+            st.warning(f"Missing columns for yogurt planning: {', '.join(sorted(missing))}")
+            return
+
+        yogurt_df = df.copy()
+        yogurt_df["customerType"] = yogurt_df.get("customerType", pd.Series("Unknown", index=yogurt_df.index)).fillna("Unknown")
+        customer_types = sorted(yogurt_df["customerType"].dropna().astype(str).unique().tolist())
+
+        with st.container():
+            st.markdown('<div class="filter-bar">', unsafe_allow_html=True)
+            yp_col1, yp_col2, yp_col3, yp_col4 = st.columns([1, 1, 1, 1])
+            with yp_col1:
+                selected_yogurt_types = st.multiselect(
+                    "Customer Type",
+                    options=customer_types,
+                    default=customer_types,
+                    key="yogurt_customer_types",
+                )
+            with yp_col2:
+                lookback_cycles = st.slider(
+                    "Lookback cycles",
+                    min_value=2,
+                    max_value=12,
+                    value=6,
+                    help="Each periodStart is treated as one order cycle.",
+                    key="yogurt_lookback_cycles",
+                )
+            with yp_col3:
+                growth_buffer_pct = st.slider(
+                    "Growth buffer %",
+                    min_value=0,
+                    max_value=50,
+                    value=12,
+                    help="Applies a planning buffer for new customers and expected growth.",
+                    key="yogurt_growth_buffer_pct",
+                )
+            with yp_col4:
+                manual_uplift_units = st.number_input(
+                    "Extra units for next cycle",
+                    min_value=0.0,
+                    step=1.0,
+                    value=0.0,
+                    help="Optional manual add-on for new wholesale demand such as Guthrie.",
+                    key="yogurt_manual_uplift_units",
+                )
+
+            ya_col1, ya_col2 = st.columns([1, 1])
+            with ya_col1:
+                yogurt_status = st.selectbox(
+                    "Order status",
+                    options=["COMPLETE", "All"],
+                    index=0,
+                    key="yogurt_status_filter",
+                )
+            with ya_col2:
+                spotlight_keyword = st.text_input(
+                    "Highlight account keyword",
+                    value="Guthrie",
+                    help="Used to call out customers or locations related to a new account.",
+                    key="yogurt_spotlight_keyword",
+                )
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        if not selected_yogurt_types:
+            st.info("Select at least one customer type to build the yogurt plan.")
+            return
+
+        yogurt_df = yogurt_df[yogurt_df["customerType"].isin(selected_yogurt_types)].copy()
+        status_filter = None if yogurt_status == "All" else yogurt_status
+
+        yogurt_plan = build_product_reorder_plan(
+            yogurt_df,
+            producer_name="Painterland Sisters",
+            product_keyword="Yogurt",
+            lookback_cycles=lookback_cycles,
+            status_filter=status_filter,
+            growth_buffer_pct=float(growth_buffer_pct),
+            manual_uplift_units=float(manual_uplift_units),
+        )
+
+        filtered_yogurt = yogurt_plan["filtered"]
+        cycle_summary = yogurt_plan["cycles"]
+        sku_plan = yogurt_plan["sku_plan"]
+        customer_summary = yogurt_plan["customer_summary"]
+        cycle_count = int(yogurt_plan["cycle_count"])
+
+        if filtered_yogurt.empty:
+            st.warning("No Painterland Sisters yogurt rows matched the loaded order data and current filters.")
+            return
+
+        selected_cycle_dates = sorted(filtered_yogurt["periodStart"].dropna().unique())
+        latest_cycle = selected_cycle_dates[-1]
+        prior_cycle = selected_cycle_dates[-2] if len(selected_cycle_dates) > 1 else None
+
+        recent_units = float(cycle_summary["total_qty"].iloc[-1]) if not cycle_summary.empty else 0.0
+        avg_units = float(cycle_summary["total_qty"].mean()) if not cycle_summary.empty else 0.0
+        trend_units = float(cycle_summary["total_qty"].tail(min(3, len(cycle_summary))).mean()) if not cycle_summary.empty else 0.0
+        recommended_units = int(sku_plan["recommended_qty"].sum()) if not sku_plan.empty else 0
+        active_customers = int(cycle_summary["active_customers"].iloc[-1]) if not cycle_summary.empty else 0
+
+        st.info(
+            f"Planning window: **{cycle_count} cycles** ending **{latest_cycle.strftime('%Y-%m-%d')}**. "
+            f"The recommendation uses the strongest of recent demand, average demand, and short-term trend, then adds your growth buffer.",
+            icon=None,
+        )
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Last 2-Week Demand", f"{recent_units:,.1f} units")
+        k2.metric("Avg 2-Week Demand", f"{avg_units:,.1f} units")
+        k3.metric("Suggested Next Order", f"{recommended_units:,} units")
+        k4.metric("Active Yogurt Customers", f"{active_customers:,}")
+
+        k5, k6, k7, k8 = st.columns(4)
+        wholesale_units = float(filtered_yogurt.loc[filtered_yogurt["customerType"].astype(str).str.upper() == "WHOLESALE", "qty"].sum())
+        retail_units = float(filtered_yogurt.loc[filtered_yogurt["customerType"].astype(str).str.upper() == "RETAIL", "qty"].sum())
+        k5.metric("Trend Baseline", f"{trend_units:,.1f} units")
+        k6.metric("Wholesale Units", f"{wholesale_units:,.1f}")
+        k7.metric("Retail Units", f"{retail_units:,.1f}")
+        k8.metric("Manual Uplift", f"{manual_uplift_units:,.1f} units")
+
+        st.markdown('<p class="section-header">Demand by Order Cycle</p>', unsafe_allow_html=True)
+        cycle_chart = cycle_summary.copy()
+        cycle_chart["period_label"] = cycle_chart["periodStart"].dt.strftime("%Y-%m-%d")
+        fig_cycle = go.Figure()
+        fig_cycle.add_trace(
+            go.Scatter(
+                x=cycle_chart["period_label"],
+                y=cycle_chart["total_qty"],
+                mode="lines+markers",
+                name="Units",
+                line=dict(color="#4a7c3f", width=3),
+                marker=dict(size=8),
+            )
+        )
+        fig_cycle.update_layout(
+            template="plotly_dark" if dark else "plotly_white",
+            height=340,
+            margin=dict(l=0, r=0, t=20, b=0),
+            xaxis_title="Cycle start",
+            yaxis_title="Units ordered",
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_cycle, use_container_width=True)
+
+        st.markdown('<p class="section-header">Recommended Next Order by SKU</p>', unsafe_allow_html=True)
+        sku_display = sku_plan[[
+            "display_sku", "recent_qty", "prior_qty", "avg_cycle_qty", "trend_cycle_qty",
+            "manual_uplift_units", "recommended_qty", "delta_vs_recent", "active_cycles",
+        ]].copy()
+        sku_display = sku_display.rename(columns={
+            "display_sku": "SKU",
+            "recent_qty": f"Latest Cycle ({latest_cycle.strftime('%m/%d')})",
+            "prior_qty": f"Prior Cycle ({prior_cycle.strftime('%m/%d')})" if prior_cycle is not None else "Prior Cycle",
+            "avg_cycle_qty": "Avg / Cycle",
+            "trend_cycle_qty": "Trend / Cycle",
+            "manual_uplift_units": "Manual Uplift",
+            "recommended_qty": "Recommended Next Order",
+            "delta_vs_recent": "Delta vs Latest",
+            "active_cycles": "Cycles Ordered",
+        })
+        st.dataframe(
+            sku_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Avg / Cycle": st.column_config.NumberColumn(format="%.1f"),
+                "Trend / Cycle": st.column_config.NumberColumn(format="%.1f"),
+                "Manual Uplift": st.column_config.NumberColumn(format="%.1f"),
+                "Recommended Next Order": st.column_config.NumberColumn(format="%d"),
+                "Delta vs Latest": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+        st.markdown('<p class="section-header">Demand by Customer</p>', unsafe_allow_html=True)
+        customer_display = customer_summary.copy()
+        if spotlight_keyword.strip():
+            spotlight_series = (
+                customer_display["customerName"].fillna("")
+                + " "
+                + customer_display["locationName"].fillna("")
+                + " "
+                + customer_display["organization"].fillna("")
+            )
+            customer_display["Spotlight Match"] = np.where(
+                spotlight_series.str.contains(spotlight_keyword, case=False, regex=False),
+                "Yes",
+                "",
+            )
+        else:
+            customer_display["Spotlight Match"] = ""
+
+        customer_display = customer_display.rename(columns={
+            "customerName": "Customer",
+            "customerType": "Type",
+            "locationName": "Location",
+            "organization": "Organization",
+            "total_qty": "Units",
+            "total_revenue": "Revenue",
+            "cycles_ordered": "Cycles",
+            "latest_cycle_qty": "Latest Cycle Units",
+            "prior_cycle_qty": "Prior Cycle Units",
+            "change_vs_prior_cycle": "Change vs Prior",
+        })
+        st.dataframe(
+            customer_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Units": st.column_config.NumberColumn(format="%.1f"),
+                "Revenue": st.column_config.NumberColumn(format="$%.2f"),
+                "Latest Cycle Units": st.column_config.NumberColumn(format="%.1f"),
+                "Prior Cycle Units": st.column_config.NumberColumn(format="%.1f"),
+                "Change vs Prior": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
+        spotlight_matches = customer_display[customer_display["Spotlight Match"] == "Yes"]
+        if spotlight_keyword.strip():
+            st.markdown('<p class="section-header">Highlighted Accounts</p>', unsafe_allow_html=True)
+            if spotlight_matches.empty:
+                st.caption(f"No loaded yogurt demand matched '{spotlight_keyword}'. You can still use the manual uplift to plan ahead for that account.")
+            else:
+                st.dataframe(spotlight_matches, use_container_width=True, hide_index=True)
 
     elif view == "Customer Segments":
         from src.order_analysis import segment_customers
