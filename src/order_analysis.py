@@ -269,6 +269,8 @@ def build_product_reorder_plan(
     status_filter: str | None = "COMPLETE",
     growth_buffer_pct: float = 0.0,
     manual_uplift_units: float = 0.0,
+    horizon_cycles: int = 3,
+    inventory_by_sku: dict[str, float] | None = None,
 ) -> dict[str, object]:
     """Build a cycle-based reorder plan for a focused product family.
 
@@ -317,12 +319,15 @@ def build_product_reorder_plan(
     filtered["organization"] = filtered.get("organization", pd.Series("", index=filtered.index)).fillna("")
     filtered["unitName"] = filtered.get("unitName", pd.Series("", index=filtered.index)).fillna("")
 
-    filtered["sku_key"] = filtered.get("productId", pd.Series(filtered["productName"], index=filtered.index)).astype(str)
     filtered["display_sku"] = np.where(
         filtered["unitName"].str.strip().ne(""),
         filtered["productName"].astype(str).str.strip() + " - " + filtered["unitName"].astype(str).str.strip(),
         filtered["productName"].astype(str).str.strip(),
     )
+    if "unitId" in filtered.columns:
+        filtered["sku_key"] = filtered["unitId"].astype(str)
+    else:
+        filtered["sku_key"] = filtered["display_sku"].astype(str)
 
     available_cycles = sorted(filtered["periodStart"].dropna().unique())
     selected_cycles = available_cycles[-max(1, lookback_cycles):]
@@ -363,6 +368,13 @@ def build_product_reorder_plan(
 
     sku_rows: list[dict[str, object]] = []
     baseline_total = 0.0
+    inventory_by_sku = inventory_by_sku or {}
+    cycle_spacing_days = 14
+    if len(selected_cycles) >= 2:
+        spacing = int((selected_cycles[-1] - selected_cycles[-2]).days)
+        if spacing > 0:
+            cycle_spacing_days = spacing
+
     for sku_key in sku_pivot.columns:
         series = sku_pivot[sku_key].astype(float)
         recent_qty = float(series.iloc[-1]) if len(series) else 0.0
@@ -398,12 +410,53 @@ def build_product_reorder_plan(
             even_split = manual_uplift_units / len(sku_plan) if len(sku_plan) else 0.0
             sku_plan["manual_uplift_units"] = even_split
 
+        sku_plan["inventory_available"] = sku_plan["display_sku"].map(lambda sku: float(inventory_by_sku.get(str(sku), 0.0)))
         sku_plan["recommended_qty"] = sku_plan.apply(
             lambda row: math.ceil(max(0.0, row["baseline_qty"] * (1 + growth_buffer_pct / 100.0) + row["manual_uplift_units"])),
             axis=1,
         )
         sku_plan["delta_vs_recent"] = sku_plan["recommended_qty"] - sku_plan["recent_qty"]
         sku_plan = sku_plan.sort_values(["recommended_qty", "recent_qty", "display_sku"], ascending=[False, False, True])
+
+    forecast_rows: list[dict[str, object]] = []
+    latest_cycle = selected_cycles[-1]
+    future_cycle_starts = [latest_cycle + pd.Timedelta(days=cycle_spacing_days * step) for step in range(1, horizon_cycles + 1)]
+
+    for _, row in sku_plan.iterrows():
+        available_inventory = float(row.get("inventory_available", 0.0))
+        cycle_projection = max(0.0, float(row.get("baseline_qty", 0.0)) * (1 + growth_buffer_pct / 100.0) + float(row.get("manual_uplift_units", 0.0)))
+        step_change = max(0.0, float(row.get("recent_qty", 0.0)) - float(row.get("prior_qty", 0.0)))
+        for bucket_idx, cycle_start in enumerate(future_cycle_starts, start=1):
+            projected_demand = max(0.0, cycle_projection + (step_change * 0.35 * (bucket_idx - 1)))
+            inventory_applied = min(available_inventory, projected_demand)
+            order_needed = max(0.0, projected_demand - inventory_applied)
+            available_inventory -= inventory_applied
+            forecast_rows.append(
+                {
+                    "sku_key": row["sku_key"],
+                    "display_sku": row["display_sku"],
+                    "forecast_cycle_number": bucket_idx,
+                    "forecast_cycle_start": cycle_start,
+                    "projected_demand": projected_demand,
+                    "inventory_applied": inventory_applied,
+                    "ending_inventory": available_inventory,
+                    "order_needed": math.ceil(order_needed),
+                }
+            )
+
+    forecast_df = pd.DataFrame(forecast_rows)
+    if not forecast_df.empty:
+        forecast_summary = (
+            forecast_df.groupby("forecast_cycle_start", as_index=False)
+            .agg(
+                projected_demand=("projected_demand", "sum"),
+                inventory_applied=("inventory_applied", "sum"),
+                order_needed=("order_needed", "sum"),
+            )
+            .sort_values("forecast_cycle_start")
+        )
+    else:
+        forecast_summary = pd.DataFrame(columns=["forecast_cycle_start", "projected_demand", "inventory_applied", "order_needed"])
 
     customer_summary = (
         scoped.groupby(["customerName", "customerType", "locationName", "organization"], dropna=False, as_index=False)
@@ -444,6 +497,9 @@ def build_product_reorder_plan(
         "sku_plan": sku_plan,
         "customer_summary": customer_summary,
         "cycle_count": len(selected_cycles),
+        "forecast_by_sku": forecast_df,
+        "forecast_summary": forecast_summary,
+        "future_cycle_starts": future_cycle_starts,
     }
 
 
