@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -308,6 +308,11 @@ def parse_painterland_unit(unit_name: object) -> dict[str, object]:
     }
 
 
+def _normalize_customer_label(value: object) -> str:
+    raw = "" if value is None or pd.isna(value) else str(value)
+    return re.sub(r"\s+", " ", raw).strip().lower()
+
+
 def build_product_reorder_plan(
     df: pd.DataFrame,
     producer_name: str,
@@ -574,6 +579,288 @@ def build_product_reorder_plan(
         "forecast_by_sku": forecast_df,
         "forecast_summary": forecast_summary,
         "future_cycle_starts": future_cycle_starts,
+    }
+
+
+def build_yogurt_cadence_plan(
+    df: pd.DataFrame,
+    producer_name: str,
+    product_keyword: str,
+    lookback_cycles: int = 6,
+    status_filter: str | None = "COMPLETE",
+    future_periods: int = 2,
+    excluded_customer_regex: str | None = r"spoilage|refund",
+    launch_accounts: Sequence[str] | None = None,
+    inventory_by_sku: dict[str, float] | None = None,
+) -> dict[str, object]:
+    """Forecast Painterland yogurt demand using customer-SKU cadence rules.
+
+    The cadence model works one customer/SKU pair at a time so new launch
+    accounts and alternating buyers do not get washed out by aggregate trends.
+    """
+
+    required_cols = {"periodStart", "qty", "producerName", "productName"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(sorted(missing))}")
+
+    work_df = df.copy()
+    work_df["periodStart"] = pd.to_datetime(work_df["periodStart"], errors="coerce")
+    work_df["qty"] = pd.to_numeric(work_df["qty"], errors="coerce").fillna(0)
+    if "customerPriceExt" in work_df.columns:
+        work_df["customerPriceExt"] = pd.to_numeric(work_df["customerPriceExt"], errors="coerce").fillna(0)
+    else:
+        work_df["customerPriceExt"] = 0.0
+
+    producer_mask = work_df["producerName"].fillna("").str.contains(producer_name, case=False, regex=False)
+    product_mask = (
+        work_df["productName"].fillna("").str.contains(product_keyword, case=False, regex=False)
+        | work_df.get("subCategory", pd.Series("", index=work_df.index)).fillna("").str.contains(product_keyword, case=False, regex=False)
+    )
+    status_mask = pd.Series(True, index=work_df.index)
+    if status_filter and "orderStatus" in work_df.columns:
+        status_mask = work_df["orderStatus"].fillna("").eq(status_filter)
+
+    filtered = work_df[producer_mask & product_mask & status_mask].copy()
+    filtered = filtered[filtered["periodStart"].notna()].copy()
+    if filtered.empty:
+        return {
+            "filtered": filtered,
+            "history_cycles": pd.DataFrame(),
+            "history_dates": [],
+            "future_cycle_starts": [],
+            "cycle_summary": pd.DataFrame(),
+            "sku_forecast": pd.DataFrame(),
+            "forecast_detail": pd.DataFrame(),
+            "customer_summary": pd.DataFrame(),
+            "current_cycle_sku": pd.DataFrame(),
+        }
+
+    filtered["customerName"] = filtered.get("customerName", pd.Series("Unknown", index=filtered.index)).fillna("Unknown")
+    filtered["customerType"] = filtered.get("customerType", pd.Series("Unknown", index=filtered.index)).fillna("Unknown")
+    filtered["locationName"] = filtered.get("locationName", pd.Series("", index=filtered.index)).fillna("")
+    filtered["organization"] = filtered.get("organization", pd.Series("", index=filtered.index)).fillna("")
+    filtered["unitName"] = filtered.get("unitName", pd.Series("", index=filtered.index)).fillna("")
+
+    if excluded_customer_regex:
+        filtered = filtered[
+            ~filtered["customerName"].fillna("").str.contains(excluded_customer_regex, case=False, regex=True)
+        ].copy()
+
+    if filtered.empty:
+        return {
+            "filtered": filtered,
+            "history_cycles": pd.DataFrame(),
+            "history_dates": [],
+            "future_cycle_starts": [],
+            "cycle_summary": pd.DataFrame(),
+            "sku_forecast": pd.DataFrame(),
+            "forecast_detail": pd.DataFrame(),
+            "customer_summary": pd.DataFrame(),
+            "current_cycle_sku": pd.DataFrame(),
+        }
+
+    unit_info = filtered["unitName"].apply(parse_painterland_unit).apply(pd.Series)
+    filtered = pd.concat([filtered, unit_info], axis=1)
+    filtered["case_equiv_qty"] = np.where(
+        filtered["is_case_sale"],
+        filtered["qty"],
+        filtered["qty"] / filtered["pack_size"],
+    )
+    filtered["case_sale_qty"] = np.where(filtered["is_case_sale"], filtered["qty"], 0.0)
+    filtered["split_unit_qty"] = np.where(filtered["is_case_sale"], 0.0, filtered["qty"])
+
+    available_cycles = sorted(filtered["periodStart"].dropna().unique())
+    selected_cycles = available_cycles[-max(1, lookback_cycles):]
+    scoped = filtered[filtered["periodStart"].isin(selected_cycles)].copy()
+
+    cycle_summary = (
+        scoped.groupby("periodStart", as_index=False)
+        .agg(
+            total_case_equiv=("case_equiv_qty", "sum"),
+            total_cases_sold=("case_sale_qty", "sum"),
+            total_split_units=("split_unit_qty", "sum"),
+            active_customers=("customerName", "nunique"),
+            revenue=("customerPriceExt", "sum"),
+        )
+        .sort_values("periodStart")
+    )
+
+    cycle_spacing_days = 7
+    if len(selected_cycles) >= 2:
+        diffs = pd.Series(selected_cycles).sort_values().diff().dropna().dt.days
+        valid_diffs = diffs[diffs > 0]
+        if not valid_diffs.empty:
+            cycle_spacing_days = int(valid_diffs.median())
+
+    latest_cycle = selected_cycles[-1]
+    future_cycle_starts = [
+        latest_cycle + pd.Timedelta(days=cycle_spacing_days * step)
+        for step in range(1, max(1, future_periods) + 1)
+    ]
+
+    launch_account_keys = {_normalize_customer_label(name) for name in (launch_accounts or []) if str(name).strip()}
+    customer_sku_history = (
+        scoped.groupby(["customerName", "order_sku", "periodStart"], as_index=False)
+        .agg(case_equiv_qty=("case_equiv_qty", "sum"))
+    )
+    wide = (
+        customer_sku_history.pivot(index=["customerName", "order_sku"], columns="periodStart", values="case_equiv_qty")
+        .reindex(columns=selected_cycles)
+        .fillna(0.0)
+    )
+
+    def classify_customer_sku(history: np.ndarray, is_launch_account: bool) -> tuple[str, list[float], str]:
+        values = np.array(history, dtype=float)
+        nonzero_idx = np.where(values > 0)[0]
+        nonzero_vals = values[nonzero_idx]
+        active_weeks = len(nonzero_idx)
+
+        if active_weeks == 0:
+            return "inactive", [0.0] * len(future_cycle_starts), "no activity"
+
+        if is_launch_account and active_weeks >= 2 and nonzero_idx[-1] == len(values) - 1:
+            recent_nonzero = nonzero_vals[-min(2, active_weeks):]
+            base = float(recent_nonzero.mean()) if len(recent_nonzero) else 0.0
+            return (
+                "launch_recurring",
+                [base] * len(future_cycle_starts),
+                f"launch account recent weeks={recent_nonzero.round(3).tolist()}",
+            )
+
+        if active_weeks >= 4:
+            recent = values[-3:] if len(values) >= 3 else values
+            weights = np.array([0.2, 0.3, 0.5])[-len(recent):]
+            weights = weights / weights.sum()
+            base = float(np.dot(recent, weights))
+            return "weekly", [base] * len(future_cycle_starts), f"weighted recent 3 weeks={recent.round(3).tolist()}"
+
+        if active_weeks >= 2:
+            parity_counts = {
+                0: int(np.sum((nonzero_idx % 2) == 0)),
+                1: int(np.sum((nonzero_idx % 2) == 1)),
+            }
+            dominant_parity = 0 if parity_counts[0] >= parity_counts[1] else 1
+            if parity_counts[dominant_parity] >= 2 and parity_counts[dominant_parity] >= active_weeks - 1:
+                parity_values = values[[idx for idx in nonzero_idx if idx % 2 == dominant_parity]]
+                base = float(parity_values.mean()) if len(parity_values) else float(nonzero_vals.mean())
+                preds: list[float] = []
+                for future_idx in range(len(values), len(values) + len(future_cycle_starts)):
+                    preds.append(base if future_idx % 2 == dominant_parity else 0.0)
+                return "biweekly", preds, f"parity={dominant_parity}, parity_values={parity_values.round(3).tolist()}"
+
+            recent_nonzero = nonzero_vals[-min(2, active_weeks):]
+            base = float(recent_nonzero.mean()) if len(recent_nonzero) else 0.0
+            return "sporadic", [0.6 * base] * len(future_cycle_starts), f"recent_nonzero={recent_nonzero.round(3).tolist()}, damped 60%"
+
+        if is_launch_account and nonzero_idx[-1] >= len(values) - 2:
+            base = float(nonzero_vals[-1])
+            return "launch_watch", [0.75 * base] * len(future_cycle_starts), f"recent single launch order={base:.3f}, carried at 75%"
+
+        return "sporadic", [0.0] * len(future_cycle_starts), f"single hit only={float(nonzero_vals[-1]):.3f}"
+
+    detail_rows: list[dict[str, object]] = []
+    for (customer_name, order_sku), values in wide.iterrows():
+        is_launch_account = _normalize_customer_label(customer_name) in launch_account_keys
+        cadence, preds, logic_detail = classify_customer_sku(values.to_numpy(dtype=float), is_launch_account)
+        row = {
+            "customerName": customer_name,
+            "order_sku": order_sku,
+            "cadence": cadence,
+            "is_launch_account": is_launch_account,
+            "logic_detail": logic_detail,
+            "active_weeks": int((values.to_numpy(dtype=float) > 0).sum()),
+            "six_cycle_cases": float(values.sum()),
+        }
+        for idx, cycle_date in enumerate(selected_cycles):
+            row[cycle_date.strftime("hist_%m%d")] = float(values.iloc[idx])
+        for idx, cycle_date in enumerate(future_cycle_starts):
+            row[f"proj_{cycle_date.strftime('%m%d')}"] = float(preds[idx])
+        detail_rows.append(row)
+
+    forecast_detail = pd.DataFrame(detail_rows)
+    if forecast_detail.empty:
+        sku_forecast = pd.DataFrame()
+    else:
+        aggregations: dict[str, tuple[str, str]] = {
+            "customer_count": ("customerName", "nunique"),
+            "launch_accounts": ("is_launch_account", "sum"),
+            "weekly_pairs": ("cadence", lambda s: int((s == "weekly").sum())),
+            "launch_pairs": ("cadence", lambda s: int(s.isin(["launch_recurring", "launch_watch"]).sum())),
+            "biweekly_pairs": ("cadence", lambda s: int((s == "biweekly").sum())),
+            "sporadic_pairs": ("cadence", lambda s: int((s == "sporadic").sum())),
+        }
+        for cycle_date in future_cycle_starts:
+            col = f"proj_{cycle_date.strftime('%m%d')}"
+            aggregations[col] = (col, "sum")
+        sku_forecast = forecast_detail.groupby("order_sku", as_index=False).agg(**aggregations)
+
+    inventory_by_sku = inventory_by_sku or {}
+    if not sku_forecast.empty:
+        sku_forecast["inventory_available"] = sku_forecast["order_sku"].map(lambda sku: float(inventory_by_sku.get(str(sku), 0.0)))
+        projection_cols = [f"proj_{cycle_date.strftime('%m%d')}" for cycle_date in future_cycle_starts]
+        sku_forecast["two_period_recommendation"] = sku_forecast[projection_cols].sum(axis=1)
+        sku_forecast = sku_forecast.sort_values(["two_period_recommendation", "order_sku"], ascending=[False, True])
+
+    current_cycle_sku = (
+        scoped[scoped["periodStart"] == latest_cycle]
+        .groupby("order_sku", as_index=False)
+        .agg(
+            latest_case_sales=("case_sale_qty", "sum"),
+            latest_split_units=("split_unit_qty", "sum"),
+            latest_case_equiv=("case_equiv_qty", "sum"),
+            active_customers=("customerName", "nunique"),
+        )
+        .sort_values(["latest_case_equiv", "order_sku"], ascending=[False, True])
+    )
+
+    customer_summary = (
+        scoped.groupby(["customerName", "customerType", "locationName", "organization"], dropna=False, as_index=False)
+        .agg(
+            total_case_equiv=("case_equiv_qty", "sum"),
+            cases_sold=("case_sale_qty", "sum"),
+            split_units_sold=("split_unit_qty", "sum"),
+            total_revenue=("customerPriceExt", "sum"),
+            cycles_ordered=("periodStart", "nunique"),
+        )
+        .sort_values(["total_case_equiv", "total_revenue", "customerName"], ascending=[False, False, True])
+    )
+    customer_summary["is_launch_account"] = customer_summary["customerName"].map(
+        lambda name: _normalize_customer_label(name) in launch_account_keys
+    )
+
+    latest_customer_qty = (
+        scoped[scoped["periodStart"] == latest_cycle]
+        .groupby("customerName")["case_equiv_qty"]
+        .sum()
+        .rename("latest_cycle_case_equiv")
+    )
+    customer_summary = customer_summary.merge(latest_customer_qty, on="customerName", how="left")
+    if len(selected_cycles) >= 2:
+        prior_cycle = selected_cycles[-2]
+        prior_customer_qty = (
+            scoped[scoped["periodStart"] == prior_cycle]
+            .groupby("customerName")["case_equiv_qty"]
+            .sum()
+            .rename("prior_cycle_case_equiv")
+        )
+        customer_summary = customer_summary.merge(prior_customer_qty, on="customerName", how="left")
+    customer_summary["latest_cycle_case_equiv"] = pd.to_numeric(customer_summary.get("latest_cycle_case_equiv", 0), errors="coerce").fillna(0)
+    customer_summary["prior_cycle_case_equiv"] = pd.to_numeric(customer_summary.get("prior_cycle_case_equiv", 0), errors="coerce").fillna(0)
+    customer_summary["change_vs_prior_cycle"] = customer_summary["latest_cycle_case_equiv"] - customer_summary["prior_cycle_case_equiv"]
+
+    return {
+        "filtered": scoped,
+        "history_cycles": cycle_summary,
+        "history_dates": selected_cycles,
+        "future_cycle_starts": future_cycle_starts,
+        "cycle_summary": cycle_summary,
+        "sku_forecast": sku_forecast,
+        "forecast_detail": forecast_detail,
+        "customer_summary": customer_summary,
+        "current_cycle_sku": current_cycle_sku,
+        "excluded_customer_regex": excluded_customer_regex,
+        "launch_accounts": list(launch_accounts or []),
     }
 
 

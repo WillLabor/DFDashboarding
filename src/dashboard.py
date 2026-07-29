@@ -26,13 +26,34 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data_loader import fetch_api_to_df, fetch_price_levels, fetch_availability_to_df, fetch_customers_from_api
-from src.order_analysis import average_order_value_by_type_period, build_product_reorder_plan, calculate_clv, parse_painterland_unit
+from src.order_analysis import average_order_value_by_type_period, build_product_reorder_plan, build_yogurt_cadence_plan, calculate_clv, parse_painterland_unit
 from src.ml_experiments import run_customer_ml
 
 DEFAULT_BASE_URL = "https://data.localfoodmarketplace.com"
 DEFAULT_ENDPOINT = "/api/Orders"
 DEFAULT_API_KEY = os.environ.get("LFM_API_KEY", "")
 DEFAULT_LAST_DAYS = 730
+
+DEFAULT_GUTHRIE_ACCOUNTS = [
+    "Ryan wheeler",
+    "Ryna weaver",
+    "Alexis Corwin",
+    "Courtney Alligar",
+    "Brent Coolbaugh",
+]
+
+DEFAULT_YOGURT_CONFIRMED_ORDER = {
+    "Passion Fruit 5.3oz case": 25.0,
+    "Vanilla Bean 5.3oz case": 120.0,
+    "Savannah Peach 5.3oz case": 90.0,
+    "Blueberry Lemon 5.3oz case": 75.0,
+    "Meadowberry 5.3oz case": 70.0,
+    "Strawberry 5.3oz case": 75.0,
+    "Plain 5.3oz case": 25.0,
+    "Raspberry 5.3oz case": 75.0,
+    "Plain 24oz case": 16.0,
+    "Vanilla Bean 24oz case": 20.0,
+}
 
 SEGMENT_COLORS = {
     "Champions":          "#10b981",
@@ -859,7 +880,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             return
 
         st.title("🥣 Painterland Sisters Yogurt Ordering")
-        st.caption("Use recent Painterland Sisters yogurt demand to plan the next 2-week order cycle.")
+        st.caption("Forecast weekly yogurt demand from customer-SKU cadence, then compare the confirmed PO against the next two projected periods.")
 
         required_yogurt_cols = {"periodStart", "qty", "producerName", "productName"}
         if not required_yogurt_cols.issubset(set(df.columns)):
@@ -905,7 +926,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
 
         with st.container():
             st.markdown('<div class="filter-bar">', unsafe_allow_html=True)
-            yp_col1, yp_col2, yp_col3, yp_col4, yp_col5 = st.columns([1, 1, 1, 1, 1])
+            yp_col1, yp_col2, yp_col3 = st.columns([1.2, 0.8, 0.8])
             with yp_col1:
                 selected_yogurt_types = st.multiselect(
                     "Customer Type",
@@ -915,53 +936,41 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
                 )
             with yp_col2:
                 lookback_cycles = st.slider(
-                    "Lookback cycles",
-                    min_value=2,
+                    "History periods",
+                    min_value=4,
                     max_value=12,
                     value=6,
-                    help="Each periodStart is treated as one order cycle.",
+                    help="Use the last N completed weekly periods for customer-SKU cadence detection.",
                     key="yogurt_lookback_cycles",
                 )
             with yp_col3:
-                growth_buffer_pct = st.slider(
-                    "Growth buffer %",
-                    min_value=0,
-                    max_value=50,
-                    value=12,
-                    help="Applies a planning buffer for new customers and expected growth.",
-                    key="yogurt_growth_buffer_pct",
-                )
-            with yp_col4:
-                manual_uplift_units = st.number_input(
-                    "Extra units for next cycle",
-                    min_value=0.0,
-                    step=1.0,
-                    value=0.0,
-                    help="Optional manual add-on for new wholesale demand such as Guthrie.",
-                    key="yogurt_manual_uplift_units",
-                )
-            with yp_col5:
-                horizon_weeks = st.selectbox(
-                    "Forecast horizon",
-                    options=[6],
-                    index=0,
-                    help="Forecast is shown in 2-week cycle buckets across the next 6 weeks.",
-                    key="yogurt_horizon_weeks",
-                )
-
-            ya_col1, ya_col2 = st.columns([1, 1])
-            with ya_col1:
                 yogurt_status = st.selectbox(
                     "Order status",
                     options=["COMPLETE", "All"],
                     index=0,
                     key="yogurt_status_filter",
                 )
+
+            ya_col1, ya_col2 = st.columns([1, 1])
+            with ya_col1:
+                launch_accounts_text = st.text_area(
+                    "Launch / Guthrie accounts",
+                    value="\n".join(DEFAULT_GUTHRIE_ACCOUNTS),
+                    height=120,
+                    help="One customer per line. These accounts are carried forward more aggressively when they begin recurring.",
+                    key="yogurt_launch_accounts",
+                )
             with ya_col2:
+                excluded_customer_regex = st.text_input(
+                    "Exclude customer regex",
+                    value="spoilage|refund",
+                    help="Matches internal or non-demand accounts that should not drive future purchase recommendations.",
+                    key="yogurt_excluded_customer_regex",
+                )
                 spotlight_keyword = st.text_input(
                     "Highlight account keyword",
                     value="Guthrie",
-                    help="Used to call out customers or locations related to a new account.",
+                    help="Used to call out accounts or locations related to the launch customers.",
                     key="yogurt_spotlight_keyword",
                 )
             st.markdown('</div>', unsafe_allow_html=True)
@@ -973,25 +982,26 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         yogurt_df = yogurt_df[yogurt_df["customerType"].isin(selected_yogurt_types)].copy()
         status_filter = None if yogurt_status == "All" else yogurt_status
 
-        yogurt_plan = build_product_reorder_plan(
+        launch_accounts = [line.strip() for line in launch_accounts_text.splitlines() if line.strip()]
+        yogurt_plan = build_yogurt_cadence_plan(
             yogurt_df,
             producer_name="Painterland Sisters",
             product_keyword="Yogurt",
             lookback_cycles=lookback_cycles,
             status_filter=status_filter,
-            growth_buffer_pct=float(growth_buffer_pct),
-            manual_uplift_units=float(manual_uplift_units),
-            horizon_cycles=max(1, int(horizon_weeks // 2)),
+            future_periods=2,
+            excluded_customer_regex=excluded_customer_regex.strip() or None,
+            launch_accounts=launch_accounts,
             inventory_by_sku=inventory_map,
         )
 
         filtered_yogurt = yogurt_plan["filtered"]
-        cycle_summary = yogurt_plan["cycles"]
-        sku_plan = yogurt_plan["sku_plan"]
+        cycle_summary = yogurt_plan["cycle_summary"]
+        sku_forecast = yogurt_plan["sku_forecast"]
         customer_summary = yogurt_plan["customer_summary"]
-        cycle_count = int(yogurt_plan["cycle_count"])
-        forecast_by_sku = yogurt_plan["forecast_by_sku"]
-        forecast_summary = yogurt_plan["forecast_summary"]
+        forecast_detail = yogurt_plan["forecast_detail"]
+        current_cycle_sku = yogurt_plan["current_cycle_sku"]
+        future_cycle_starts = yogurt_plan["future_cycle_starts"]
 
         if filtered_yogurt.empty:
             st.warning("No Painterland Sisters yogurt rows matched the loaded order data and current filters.")
@@ -1000,51 +1010,88 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         selected_cycle_dates = sorted(filtered_yogurt["periodStart"].dropna().unique())
         latest_cycle = selected_cycle_dates[-1]
         prior_cycle = selected_cycle_dates[-2] if len(selected_cycle_dates) > 1 else None
+        next_cycle = future_cycle_starts[0] if future_cycle_starts else None
+        second_future_cycle = future_cycle_starts[1] if len(future_cycle_starts) > 1 else None
 
         recent_case_equiv = float(cycle_summary["total_case_equiv"].iloc[-1]) if not cycle_summary.empty else 0.0
         avg_case_equiv = float(cycle_summary["total_case_equiv"].mean()) if not cycle_summary.empty else 0.0
-        trend_case_equiv = float(cycle_summary["total_case_equiv"].tail(min(3, len(cycle_summary))).mean()) if not cycle_summary.empty else 0.0
         current_cycle_cases = float(cycle_summary["total_cases_sold"].iloc[-1]) if not cycle_summary.empty else 0.0
         current_cycle_split_units = float(cycle_summary["total_split_units"].iloc[-1]) if not cycle_summary.empty else 0.0
-        recommended_units = int(sku_plan["recommended_qty"].sum()) if not sku_plan.empty else 0
         active_customers = int(cycle_summary["active_customers"].iloc[-1]) if not cycle_summary.empty else 0
-        inventory_units = float(sku_plan["inventory_available"].sum()) if "inventory_available" in sku_plan.columns else 0.0
-        first_cycle_order_need = int(forecast_summary["order_needed"].iloc[0]) if not forecast_summary.empty else 0
+        inventory_units = float(sku_forecast["inventory_available"].sum()) if "inventory_available" in sku_forecast.columns else 0.0
+        next_cycle_projection = float(sku_forecast[f"proj_{next_cycle.strftime('%m%d')}"] .sum()) if next_cycle is not None and not sku_forecast.empty else 0.0
+        second_cycle_projection = float(sku_forecast[f"proj_{second_future_cycle.strftime('%m%d')}"] .sum()) if second_future_cycle is not None and not sku_forecast.empty else 0.0
+        two_cycle_recommendation = float(sku_forecast["two_period_recommendation"].sum()) if not sku_forecast.empty else 0.0
+        launch_pair_count = int(forecast_detail["is_launch_account"].sum()) if not forecast_detail.empty else 0
+
+        if "yogurt_confirmed_order_map" not in st.session_state:
+            st.session_state.yogurt_confirmed_order_map = DEFAULT_YOGURT_CONFIRMED_ORDER.copy()
+
+        confirmed_map = dict(st.session_state.yogurt_confirmed_order_map)
+        plan_skus = sorted(sku_forecast["order_sku"].unique().tolist()) if not sku_forecast.empty else sorted(DEFAULT_YOGURT_CONFIRMED_ORDER.keys())
+        confirmed_editor_df = pd.DataFrame(
+            {
+                "SKU": plan_skus,
+                "Confirmed PO Cases": [float(confirmed_map.get(sku, 0.0)) for sku in plan_skus],
+            }
+        )
+        confirmed_editor_df = st.data_editor(
+            confirmed_editor_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key="yogurt_confirmed_order_editor",
+            column_config={
+                "SKU": st.column_config.TextColumn(disabled=True),
+                "Confirmed PO Cases": st.column_config.NumberColumn(format="%.1f", min_value=0.0),
+            },
+        )
+        st.session_state.yogurt_confirmed_order_map = {
+            row["SKU"]: float(row["Confirmed PO Cases"]) for _, row in confirmed_editor_df.iterrows()
+        }
+
+        comparison_df = sku_forecast.merge(
+            confirmed_editor_df.rename(columns={"SKU": "order_sku", "Confirmed PO Cases": "confirmed_po_cases"}),
+            on="order_sku",
+            how="left",
+        ).fillna({"confirmed_po_cases": 0.0})
+        comparison_df["confirmed_minus_recommendation"] = comparison_df["confirmed_po_cases"] - comparison_df["two_period_recommendation"]
+        confirmed_total = float(comparison_df["confirmed_po_cases"].sum()) if not comparison_df.empty else 0.0
+        confirmed_delta_total = float(comparison_df["confirmed_minus_recommendation"].sum()) if not comparison_df.empty else 0.0
 
         st.info(
-            f"Planning window: **{cycle_count} cycles** ending **{latest_cycle.strftime('%Y-%m-%d')}**. "
-            f"The recommendation uses the strongest of recent demand, average demand, and short-term trend, then adds your growth buffer. "
-            f"Forecasts are shown as 2-week cycle buckets for the next {horizon_weeks} weeks.",
+            f"Planning window: **{len(selected_cycle_dates)} weekly periods** ending **{latest_cycle.strftime('%Y-%m-%d')}**. "
+            f"The model forecasts each customer/SKU cadence separately, carries launch accounts forward, excludes non-demand accounts by regex, and then sums the next two weeks back to SKU totals.",
             icon=None,
         )
         if inventory_loaded:
-            st.caption("Inventory adjustment is active using the loaded Availability dataset, converted to case equivalents.")
+            st.caption("Current availability is loaded and shown in case equivalents for reference. It is not automatically netted against this confirmed-PO comparison because the timing depends on when that stock becomes available to sell.")
         else:
-            st.caption("Inventory adjustment is off because Painterland availability data has not been loaded yet. Fetch Availability first if you want on-hand inventory netted out in cases.")
+            st.caption("Availability has not been loaded yet. Fetch Availability if you want to see current on-hand yogurt in case equivalents alongside the demand forecast.")
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Last 2-Week Demand", f"{recent_case_equiv:,.2f} cases")
-        k2.metric("Avg 2-Week Demand", f"{avg_case_equiv:,.2f} cases")
-        k3.metric("Current Cycle Cases Sold", f"{current_cycle_cases:,.0f}")
+        k1.metric("Latest Week Demand", f"{recent_case_equiv:,.2f} cases")
+        k2.metric("Avg Weekly Demand", f"{avg_case_equiv:,.2f} cases")
+        k3.metric("Latest Week Cases Sold", f"{current_cycle_cases:,.0f}")
         k4.metric("Active Yogurt Customers", f"{active_customers:,}")
 
         k5, k6, k7, k8 = st.columns(4)
         wholesale_units = float(filtered_yogurt.loc[filtered_yogurt["customerType"].astype(str).str.upper() == "WHOLESALE", "qty"].sum())
         retail_units = float(filtered_yogurt.loc[filtered_yogurt["customerType"].astype(str).str.upper() == "RETAIL", "qty"].sum())
-        k5.metric("Current Split Units Sold", f"{current_cycle_split_units:,.0f}")
+        k5.metric("Latest Split Units Sold", f"{current_cycle_split_units:,.0f}")
         k6.metric("On-Hand Inventory", f"{inventory_units:,.2f} cases")
-        k7.metric("Next Cycle Order Need", f"{first_cycle_order_need:,} cases")
-        k8.metric("Wholesale Raw Units", f"{wholesale_units:,.1f}")
+        k7.metric(next_cycle.strftime("Proj %m/%d") if next_cycle is not None else "Next Projection", f"{next_cycle_projection:,.2f} cases")
+        k8.metric(second_future_cycle.strftime("Proj %m/%d") if second_future_cycle is not None else "Week 2 Projection", f"{second_cycle_projection:,.2f} cases")
 
         k9, k10, _, _ = st.columns(4)
-        k9.metric("Trend Baseline", f"{trend_case_equiv:,.2f} cases")
-        k10.metric("Retail Raw Units", f"{retail_units:,.1f}")
+        k9.metric("2-Week Recommendation", f"{two_cycle_recommendation:,.2f} cases")
+        k10.metric("Launch Customer-SKUs", f"{launch_pair_count:,}")
 
         k11, k12, _, _ = st.columns(4)
-        k11.metric("Suggested Next Order", f"{recommended_units:,} cases")
-        k12.metric("Manual Uplift", f"{manual_uplift_units:,.1f} cases")
+        k11.metric("Confirmed PO", f"{confirmed_total:,.2f} cases")
+        k12.metric("PO vs Recommendation", f"{confirmed_delta_total:+,.2f} cases")
 
-        st.markdown('<p class="section-header">Demand by Order Cycle</p>', unsafe_allow_html=True)
+        st.markdown('<p class="section-header">Weekly Demand History</p>', unsafe_allow_html=True)
         cycle_chart = cycle_summary.copy()
         cycle_chart["period_label"] = cycle_chart["periodStart"].dt.strftime("%Y-%m-%d")
         fig_cycle = go.Figure()
@@ -1062,124 +1109,86 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             template="plotly_dark" if dark else "plotly_white",
             height=340,
             margin=dict(l=0, r=0, t=20, b=0),
-            xaxis_title="Cycle start",
+            xaxis_title="Week start",
             yaxis_title="Cases needed",
             hovermode="x unified",
         )
         st.plotly_chart(fig_cycle, use_container_width=True)
 
-        st.markdown('<p class="section-header">Current Cycle Grounding by Order SKU</p>', unsafe_allow_html=True)
-        current_cycle_sku = sku_plan[[
-            "display_sku", "latest_case_sales", "latest_split_units", "recent_case_equiv", "pack_size",
-        ]].copy()
+        st.markdown('<p class="section-header">Latest Week Grounding by Order SKU</p>', unsafe_allow_html=True)
         current_cycle_sku = current_cycle_sku.rename(columns={
-            "display_sku": "Order SKU",
-            "latest_case_sales": "Cases Sold in Current Cycle",
-            "latest_split_units": "Split Units Sold in Current Cycle",
-            "recent_case_equiv": "Current Cycle Case-Equivalent",
-            "pack_size": "Units per Case",
+            "order_sku": "Order SKU",
+            "latest_case_sales": "Cases Sold in Latest Week",
+            "latest_split_units": "Split Units Sold in Latest Week",
+            "latest_case_equiv": "Latest Week Case-Equivalent",
+            "active_customers": "Customers Ordering Latest Week",
         })
         st.dataframe(
             current_cycle_sku,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Current Cycle Case-Equivalent": st.column_config.NumberColumn(format="%.3f"),
+                "Latest Week Case-Equivalent": st.column_config.NumberColumn(format="%.3f"),
             },
         )
 
-        st.markdown('<p class="section-header">Next 6 Weeks Forecast by Cycle</p>', unsafe_allow_html=True)
-        if not forecast_summary.empty:
-            forecast_chart = forecast_summary.copy()
-            forecast_chart["cycle_label"] = forecast_chart["forecast_cycle_start"].dt.strftime("%Y-%m-%d")
-            fig_forecast = go.Figure()
-            fig_forecast.add_trace(go.Bar(x=forecast_chart["cycle_label"], y=forecast_chart["projected_demand"], name="Projected Demand", marker_color="#8fce74"))
-            fig_forecast.add_trace(go.Bar(x=forecast_chart["cycle_label"], y=forecast_chart["inventory_applied"], name="Inventory Applied", marker_color="#1f77b4"))
-            fig_forecast.add_trace(go.Bar(x=forecast_chart["cycle_label"], y=forecast_chart["order_needed"], name="Order Needed", marker_color="#4a7c3f"))
-            fig_forecast.update_layout(
-                barmode="group",
-                template="plotly_dark" if dark else "plotly_white",
-                height=360,
-                margin=dict(l=0, r=0, t=20, b=0),
-                xaxis_title="Future cycle start",
-                yaxis_title="Units",
-            )
-            st.plotly_chart(fig_forecast, use_container_width=True)
-
-            forecast_display = forecast_summary.rename(columns={
-                "forecast_cycle_start": "Future Cycle Start",
-                "projected_demand": "Projected Demand",
-                "inventory_applied": "Inventory Applied",
-                "order_needed": "Order Needed",
-            }).copy()
-            st.dataframe(
-                forecast_display,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Future Cycle Start": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                    "Projected Demand": st.column_config.NumberColumn(format="%.1f"),
-                    "Inventory Applied": st.column_config.NumberColumn(format="%.1f"),
-                    "Order Needed": st.column_config.NumberColumn(format="%d"),
-                },
-            )
-
-        st.markdown('<p class="section-header">Recommended Next Order by SKU</p>', unsafe_allow_html=True)
-        sku_display = sku_plan[[
-            "display_sku", "latest_case_sales", "latest_split_units", "recent_case_equiv", "prior_case_equiv", "avg_cycle_cases", "trend_cycle_cases",
-            "inventory_available", "manual_uplift_units", "recommended_qty", "delta_vs_recent", "active_cycles",
-        ]].copy()
-        sku_display = sku_display.rename(columns={
-            "display_sku": "SKU",
-            "latest_case_sales": "Cases Sold",
-            "latest_split_units": "Split Units Sold",
-            "recent_case_equiv": f"Latest Cycle Cases ({latest_cycle.strftime('%m/%d')})",
-            "prior_case_equiv": f"Prior Cycle Cases ({prior_cycle.strftime('%m/%d')})" if prior_cycle is not None else "Prior Cycle Cases",
-            "avg_cycle_cases": "Avg Cases / Cycle",
-            "trend_cycle_cases": "Trend Cases / Cycle",
+        st.markdown('<p class="section-header">Confirmed PO vs Two-Week Recommendation</p>', unsafe_allow_html=True)
+        comparison_display = comparison_df.copy()
+        if next_cycle is not None:
+            comparison_display = comparison_display.rename(columns={f"proj_{next_cycle.strftime('%m%d')}": f"Proj {next_cycle.strftime('%m/%d')}"})
+        if second_future_cycle is not None:
+            comparison_display = comparison_display.rename(columns={f"proj_{second_future_cycle.strftime('%m%d')}": f"Proj {second_future_cycle.strftime('%m/%d')}"})
+        comparison_display = comparison_display.rename(columns={
+            "order_sku": "SKU",
+            "customer_count": "Customers",
+            "launch_accounts": "Launch Accounts",
+            "weekly_pairs": "Weekly Pairs",
+            "launch_pairs": "Launch Pairs",
+            "biweekly_pairs": "Biweekly Pairs",
+            "sporadic_pairs": "Sporadic Pairs",
             "inventory_available": "Inventory On Hand",
-            "manual_uplift_units": "Manual Uplift",
-            "recommended_qty": "Recommended Next Order",
-            "delta_vs_recent": "Delta vs Latest Cases",
-            "active_cycles": "Cycles Ordered",
+            "two_period_recommendation": "2-Week Recommendation",
+            "confirmed_po_cases": "Confirmed PO Cases",
+            "confirmed_minus_recommendation": "Confirmed minus Recommendation",
         })
         st.dataframe(
-            sku_display,
+            comparison_display,
             use_container_width=True,
             hide_index=True,
             column_config={
-                f"Latest Cycle Cases ({latest_cycle.strftime('%m/%d')})": st.column_config.NumberColumn(format="%.3f"),
-                f"Prior Cycle Cases ({prior_cycle.strftime('%m/%d')})" if prior_cycle is not None else "Prior Cycle Cases": st.column_config.NumberColumn(format="%.3f"),
-                "Avg Cases / Cycle": st.column_config.NumberColumn(format="%.3f"),
-                "Trend Cases / Cycle": st.column_config.NumberColumn(format="%.3f"),
+                f"Proj {next_cycle.strftime('%m/%d')}" if next_cycle is not None else "": st.column_config.NumberColumn(format="%.3f") if next_cycle is not None else None,
+                f"Proj {second_future_cycle.strftime('%m/%d')}" if second_future_cycle is not None else "": st.column_config.NumberColumn(format="%.3f") if second_future_cycle is not None else None,
                 "Inventory On Hand": st.column_config.NumberColumn(format="%.3f"),
-                "Manual Uplift": st.column_config.NumberColumn(format="%.3f"),
-                "Recommended Next Order": st.column_config.NumberColumn(format="%d"),
-                "Delta vs Latest Cases": st.column_config.NumberColumn(format="%.3f"),
+                "2-Week Recommendation": st.column_config.NumberColumn(format="%.3f"),
+                "Confirmed PO Cases": st.column_config.NumberColumn(format="%.1f"),
+                "Confirmed minus Recommendation": st.column_config.NumberColumn(format="%.3f"),
             },
         )
 
-        if not forecast_by_sku.empty:
-            st.markdown('<p class="section-header">SKU Forecast by Future 2-Week Bucket</p>', unsafe_allow_html=True)
-            sku_forecast_display = forecast_by_sku.rename(columns={
-                "display_sku": "SKU",
-                "forecast_cycle_number": "Bucket",
-                "forecast_cycle_start": "Future Cycle Start",
-                "projected_demand": "Projected Demand",
-                "inventory_applied": "Inventory Applied",
-                "ending_inventory": "Ending Inventory",
-                "order_needed": "Order Needed",
-            }).copy()
+        if not forecast_detail.empty:
+            st.markdown('<p class="section-header">Customer-SKU Cadence Detail</p>', unsafe_allow_html=True)
+            detail_display = forecast_detail.copy()
+            for cycle_date in selected_cycle_dates:
+                detail_display = detail_display.rename(columns={cycle_date.strftime("hist_%m%d"): cycle_date.strftime("Hist %m/%d")})
+            if next_cycle is not None:
+                detail_display = detail_display.rename(columns={f"proj_{next_cycle.strftime('%m%d')}": f"Proj {next_cycle.strftime('%m/%d')}"})
+            if second_future_cycle is not None:
+                detail_display = detail_display.rename(columns={f"proj_{second_future_cycle.strftime('%m%d')}": f"Proj {second_future_cycle.strftime('%m/%d')}"})
+            detail_display = detail_display.rename(columns={
+                "customerName": "Customer",
+                "order_sku": "SKU",
+                "cadence": "Cadence",
+                "is_launch_account": "Launch Account",
+                "active_weeks": "Active Weeks",
+                "six_cycle_cases": "Cases in History",
+                "logic_detail": "Logic",
+            })
             st.dataframe(
-                sku_forecast_display,
+                detail_display,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Future Cycle Start": st.column_config.DateColumn(format="YYYY-MM-DD"),
-                    "Projected Demand": st.column_config.NumberColumn(format="%.1f"),
-                    "Inventory Applied": st.column_config.NumberColumn(format="%.1f"),
-                    "Ending Inventory": st.column_config.NumberColumn(format="%.1f"),
-                    "Order Needed": st.column_config.NumberColumn(format="%d"),
+                    "Cases in History": st.column_config.NumberColumn(format="%.3f"),
                 },
             )
 
@@ -1206,6 +1215,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
             "customerType": "Type",
             "locationName": "Location",
             "organization": "Organization",
+            "is_launch_account": "Launch Account",
             "total_case_equiv": "Cases Equivalent",
             "cases_sold": "Cases Sold",
             "split_units_sold": "Split Units Sold",
@@ -1234,7 +1244,7 @@ def main(api_key: str | None = None, user_display_name: str | None = None) -> No
         if spotlight_keyword.strip():
             st.markdown('<p class="section-header">Highlighted Accounts</p>', unsafe_allow_html=True)
             if spotlight_matches.empty:
-                st.caption(f"No loaded yogurt demand matched '{spotlight_keyword}'. You can still use the manual uplift to plan ahead for that account.")
+                st.caption(f"No loaded yogurt demand matched '{spotlight_keyword}'. Update the launch-account list if a new customer should be treated like the Guthrie rollout accounts.")
             else:
                 st.dataframe(spotlight_matches, use_container_width=True, hide_index=True)
 
